@@ -11,6 +11,13 @@ public final class MyHomeLibApp {
     }
 
     public static void main(String[] args) {
+        // Гарантуємо, що будь-яка помилка в потоці Swing (EDT) буде повністю роздрукована в консоль
+        Thread.setDefaultUncaughtExceptionHandler((thread, throwable) -> {
+            System.err.println("=== CRITICAL EMERGENCY STACK TRACE ===");
+            throwable.printStackTrace(System.err);
+            System.err.println("=======================================");
+        });
+
         SwingUtilities.invokeLater(() -> {
             try {
                 UIManager.setLookAndFeel(UIManager.getSystemLookAndFeelClassName());

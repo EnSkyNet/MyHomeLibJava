@@ -1,15 +1,15 @@
 package org.myhomelib.db;
 
-import org.myhomelib.model.Book;
-import org.myhomelib.model.BookEdit;
-import org.myhomelib.model.Fb2Book;
+import org.myhomelib.model.*;
+
 
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 
 public interface BookCollection extends AutoCloseable {
-    void open(Path newPath);
+
+    void open(Path path);
 
     Path path();
 
@@ -17,21 +17,11 @@ public interface BookCollection extends AutoCloseable {
 
     List<Book> searchBooks(String query);
 
-    List<String> listAuthors();
+    List<Book> searchBooks(String query, int limit);
 
-    List<String> listSeries();
+    List<Book> searchBooksPaged(String query, int pageSize, int pageNumber);
 
-    List<String> listGenres();
-
-    List<String> listGroups();
-
-    Map<String, Integer> statistics();
-
-    Map<String, String> settings();
-
-    String setting(String key, String fallback);
-
-    void putSetting(String key, String value);
+    List<Book> searchAdvanced(SearchCriteria criteria);
 
     void updateBook(long bookId, BookEdit edit);
 
@@ -64,4 +54,37 @@ public interface BookCollection extends AutoCloseable {
     String seriesFilterType();
 
     void setSeriesFilterType(String seriesFilterType);
+
+    String genreFilterType();
+
+    void setGenreFilterType(String genreFilterType);
+
+    List<String> listAuthors();
+
+    List<String> listSeries();
+
+    List<String> listGenres();
+
+    List<String> listGroups();
+
+    Map<String, Integer> statistics();
+
+    Map<String, String> settings();
+
+    String setting(String key, String fallback);
+
+    void putSetting(String key, String value);
+
+    int importGenreList(List<Database.GenreImport> genres, String source);
+
+    void saveSearchPreset(String name, SearchCriteria criteria);
+
+    List<SearchPreset> loadSearchPresets();
+
+    void deleteSearchPreset(long presetId);
+
+    void renameSearchPreset(long presetId, String newName);
+
+    @Override
+    void close();
 }

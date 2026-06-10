@@ -23,7 +23,9 @@ public final class CollectionManager implements AutoCloseable {
         );
         this.activeCollection = systemDatabase.collection(collectionId);
         this.collectionDatabase = new Database(activeCollection.databasePath());
-        syncActiveCollectionBooks();
+
+        // !!! ВИДАЛІТЬ АБО ЗАКОМЕНТУЙТЕ ЦЕЙ РЯДОК !!!
+        // syncActiveCollectionBooks();
     }
 
     public static CollectionManager open(Path collectionPath) {
@@ -51,7 +53,21 @@ public final class CollectionManager implements AutoCloseable {
         if (activeCollection == null) {
             return;
         }
-        systemDatabase.replaceBooks(activeCollection.id(), collectionDatabase.searchBooks(""));
+
+        // Запускаємо важку синхронізацію асинхронно у фоновому потоці Java
+        java.util.concurrent.CompletableFuture.runAsync(() -> {
+            System.out.println("[Синхронізація] Початок обробки книг у фоні...");
+
+            // База даних буде зчитувати книги у фоні, UI залишається повністю робочим
+            List<org.myhomelib.model.Book> allBooks = collectionDatabase.searchBooks("");
+            systemDatabase.replaceBooks(activeCollection.id(), allBooks);
+
+            System.out.println("[Синхронізація] Успішно синхронізовано " + allBooks.size() + " книг.");
+        }).exceptionally(ex -> {
+            System.err.println("[Синхронізація] Помилка під час фонової синхронізації:");
+            ex.printStackTrace();
+            return null;
+        });
     }
 
     public void openOrRegisterCollection(Path databasePath) {
@@ -67,7 +83,7 @@ public final class CollectionManager implements AutoCloseable {
         }
         collectionDatabase.open(collection.databasePath());
         activeCollection = collection;
-        syncActiveCollectionBooks();
+        //syncActiveCollectionBooks();
     }
 
     private static Path systemDatabasePath(Path collectionPath) {

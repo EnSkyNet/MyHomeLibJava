@@ -3,7 +3,10 @@ package org.myhomelib.importer;
 import org.myhomelib.model.Author;
 import org.myhomelib.model.Fb2Book;
 
+import java.io.BufferedReader;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -22,8 +25,10 @@ public final class InpxImporter {
     private static final String DEFAULT_STRUCTURE =
             "AUTHOR;GENRE;TITLE;SERIES;SERNO;FILE;SIZE;LIBID;DEL;EXT;DATE;LANG;LIBRATE;KEYWORDS";
 
-    public List<Fb2Book> importFile(Path inpxFile, Consumer<String> status) throws IOException {
-        List<Fb2Book> books = new ArrayList<>();
+    // Тепер метод повертає void і приймає onBookParsed для миттєвої обробки кожної книги
+    public void importFile(Path inpxFile, Consumer<Fb2Book> onBookParsed, Consumer<String> status) throws IOException {
+        int totalParsed = 0;
+
         try (ZipFile zip = new ZipFile(inpxFile.toFile())) {
             List<Field> fields = fields(readStructure(zip));
             List<? extends ZipEntry> entries = zip.stream()
@@ -33,17 +38,38 @@ public final class InpxImporter {
                     .toList();
 
             for (ZipEntry entry : entries) {
-                status.accept("Importing INPX: " + entry.getName());
-                String content = stripBom(new String(zip.getInputStream(entry).readAllBytes(), StandardCharsets.UTF_8));
-                String[] lines = content.split("\\R");
-                for (int i = 0; i < lines.length; i++) {
-                    if (!lines[i].isBlank()) {
-                        books.add(parseLine(lines[i], fields, inpxFile, entry.getName(), i));
+                status.accept("Importing INPX: " + entry.getName() + " (Total parsed: " + totalParsed + ")");
+
+                try (InputStream is = zip.getInputStream(entry);
+                     InputStreamReader isr = new InputStreamReader(is, StandardCharsets.UTF_8);
+                     BufferedReader reader = new BufferedReader(isr)) {
+
+                    String line;
+                    int lineNumber = 0;
+                    boolean firstLine = true;
+
+                    while ((line = reader.readLine()) != null) {
+                        if (firstLine) {
+                            line = stripBom(line);
+                            firstLine = false;
+                        }
+                        if (!line.isBlank()) {
+                            Fb2Book book = parseLine(line, fields, inpxFile, entry.getName(), lineNumber);
+
+                            onBookParsed.accept(book);
+                            totalParsed++;
+
+                            // Оновлюємо статус рідше — синхронно з новим розміром батчу
+                            if (totalParsed % 20000 == 0) {
+                                status.accept("Importing INPX: " + entry.getName() + " (Total parsed: " + totalParsed + ")");
+                            }
+                        }
+                        lineNumber++;
                     }
                 }
             }
+            status.accept("Import completed! Total books processed: " + totalParsed);
         }
-        return books;
     }
 
     private static String readStructure(ZipFile zip) throws IOException {
@@ -51,7 +77,9 @@ public final class InpxImporter {
         if (structure == null) {
             return DEFAULT_STRUCTURE;
         }
-        return stripBom(new String(zip.getInputStream(structure).readAllBytes(), StandardCharsets.UTF_8)).trim();
+        try (InputStream is = zip.getInputStream(structure)) {
+            return stripBom(new String(is.readAllBytes(), StandardCharsets.UTF_8)).trim();
+        }
     }
 
     private static List<Field> fields(String structure) {
@@ -137,7 +165,20 @@ public final class InpxImporter {
     }
 
     private static String cleanFilePart(String value) {
-        return value.replaceAll("[<>:\"/\\\\|*?]", " ").trim();
+        if (value == null || value.isBlank()) {
+            return "";
+        }
+        char[] chars = value.toCharArray();
+        boolean changed = false;
+        for (int i = 0; i < chars.length; i++) {
+            char c = chars[i];
+            if (c == '<' || c == '>' || c == ':' || c == '"' || c == '/'
+                    || c == '\\' || c == '|' || c == '*' || c == '?') {
+                chars[i] = ' ';
+                changed = true;
+            }
+        }
+        return changed ? new String(chars).trim() : value.trim();
     }
 
     private static String normalizeExtension(String value) {

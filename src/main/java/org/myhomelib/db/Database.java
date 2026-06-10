@@ -1,9 +1,6 @@
 package org.myhomelib.db;
 
-import org.myhomelib.model.Author;
-import org.myhomelib.model.Book;
-import org.myhomelib.model.BookEdit;
-import org.myhomelib.model.Fb2Book;
+import org.myhomelib.model.*;
 
 import java.nio.file.Path;
 import java.sql.Connection;
@@ -23,11 +20,16 @@ import java.util.Map;
 public final class Database implements BookCollection {
     private Connection connection;
     private Path path;
+    private final Map<String, Long> globalSeriesCache = new java.util.HashMap<>();
+    private final Map<String, Long> globalAuthorCache = new java.util.HashMap<>();
+    private String seriesFilterType = "all";
+    private String genreFilterType = "all";
 
     public Database(Path path) {
         open(path);
     }
 
+    @Override
     public void open(Path newPath) {
         closeQuietly();
         try {
@@ -37,6 +39,8 @@ public final class Database implements BookCollection {
             try (Statement statement = connection.createStatement()) {
                 statement.execute("PRAGMA foreign_keys = ON");
                 statement.execute("PRAGMA journal_mode = WAL");
+                statement.execute("PRAGMA synchronous = NORMAL");
+                statement.execute("PRAGMA cache_size = -64000"); // 64MB Cache
             }
             initializeSchema();
         } catch (SQLException e) {
@@ -44,985 +48,1002 @@ public final class Database implements BookCollection {
         }
     }
 
+    private void initializeSchema() throws SQLException {
+        try (Statement statement = connection.createStatement()) {
+            statement.execute("""
+                    CREATE TABLE IF NOT EXISTS Authors (
+                        AuthorID INTEGER PRIMARY KEY AUTOINCREMENT,
+                        FirstName TEXT,
+                        MiddleName TEXT,
+                        LastName TEXT NOT NULL
+                    );
+                    """);
+
+            statement.execute("""
+                    CREATE TABLE IF NOT EXISTS Series (
+                        SeriesID INTEGER PRIMARY KEY AUTOINCREMENT,
+                        Name TEXT NOT NULL UNIQUE
+                    );
+                    """);
+
+            boolean hasNameColumn = false;
+            try (ResultSet rs = statement.executeQuery("PRAGMA table_info(Series);")) {
+                while (rs.next()) {
+                    if ("Name".equalsIgnoreCase(rs.getString("name"))) {
+                        hasNameColumn = true;
+                        break;
+                    }
+                }
+            }
+            if (!hasNameColumn) {
+                try {
+                    statement.execute("ALTER TABLE Series ADD COLUMN Name TEXT NOT NULL DEFAULT '';");
+                } catch (SQLException ignored) {
+                    statement.execute("ALTER TABLE Series ADD COLUMN Name TEXT;");
+                }
+            }
+
+            statement.execute("""
+                    CREATE TABLE IF NOT EXISTS Books (
+                        BookID INTEGER PRIMARY KEY AUTOINCREMENT,
+                        Title TEXT NOT NULL,
+                        SeriesID INTEGER,
+                        SequenceNumber INTEGER,
+                        Language TEXT,
+                        FileName TEXT NOT NULL,
+                        Folder TEXT,
+                        ArchiveEntry TEXT,
+                        FileSize INTEGER NOT NULL,
+                        Keywords TEXT,
+                        Annotation TEXT,
+                        Rate INTEGER DEFAULT 0,
+                        Progress INTEGER DEFAULT 0,
+                        UpdateDate TEXT,
+                        FOREIGN KEY (SeriesID) REFERENCES Series(SeriesID) ON DELETE SET NULL
+                    );
+                    """);
+
+            statement.execute("""
+                    CREATE TABLE IF NOT EXISTS BookAuthors (
+                        BookID INTEGER,
+                        AuthorID INTEGER,
+                        PRIMARY KEY (BookID, AuthorID),
+                        FOREIGN KEY (BookID) REFERENCES Books(BookID) ON DELETE CASCADE,
+                        FOREIGN KEY (AuthorID) REFERENCES Authors(AuthorID) ON DELETE CASCADE
+                    );
+                    """);
+
+            statement.execute("""
+                    CREATE TABLE IF NOT EXISTS Genres (
+                        GenreID INTEGER PRIMARY KEY AUTOINCREMENT,
+                        Code TEXT NOT NULL UNIQUE,
+                        ParentCode TEXT,
+                        Fb2Code TEXT,
+                        Alias TEXT
+                    );
+                    """);
+
+            statement.execute("""
+                    CREATE TABLE IF NOT EXISTS BookGenres (
+                        BookID INTEGER,
+                        GenreCode TEXT,
+                        PRIMARY KEY (BookID, GenreCode),
+                        FOREIGN KEY (BookID) REFERENCES Books(BookID) ON DELETE CASCADE
+                    );
+                    """);
+
+            statement.execute("""
+                    CREATE TABLE IF NOT EXISTS BookGroups (
+                        BookID INTEGER,
+                        GroupName TEXT,
+                        PRIMARY KEY (BookID, GroupName),
+                        FOREIGN KEY (BookID) REFERENCES Books(BookID) ON DELETE CASCADE
+                    );
+                    """);
+
+            statement.execute("""
+                    CREATE TABLE IF NOT EXISTS Settings (
+                        Key TEXT PRIMARY KEY,
+                        Value TEXT
+                    );
+                    """);
+
+            statement.execute("""
+                    CREATE TABLE IF NOT EXISTS SearchPresets (
+                        PresetID INTEGER PRIMARY KEY AUTOINCREMENT,
+                        Name TEXT NOT NULL UNIQUE,
+                        Title TEXT,
+                        Author TEXT,
+                        Genre TEXT,
+                        Series TEXT,
+                        Language TEXT,
+                        RateFrom INTEGER,
+                        RateTo INTEGER,
+                        ProgressFrom INTEGER,
+                        ProgressTo INTEGER,
+                        SizeFrom INTEGER,
+                        SizeTo INTEGER,
+                        Keywords TEXT,
+                        Annotation TEXT,
+                        GroupName TEXT
+                    );
+                    """);
+
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_books_title ON Books(Title);");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_books_series ON Books(SeriesID);");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_bookauthors_book ON BookAuthors(BookID);");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_bookauthors_author ON BookAuthors(AuthorID);");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_bookgenres_book ON BookGenres(BookID);");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_bookgenres_genre ON BookGenres(GenreCode);");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_series_name ON Series(Name);");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_authors_name ON Authors(LastName, FirstName);");
+        }
+    }
+
+    @Override
     public Path path() {
         return path;
     }
 
-    private void initializeSchema() throws SQLException {
-        try (Statement statement = connection.createStatement()) {
-            statement.execute("""
-                    CREATE TABLE IF NOT EXISTS Settings (
-                        Key TEXT PRIMARY KEY,
-                        Value TEXT NOT NULL
-                    )
-                    """);
-            statement.execute("""
-                    CREATE TABLE IF NOT EXISTS Series (
-                        SeriesID INTEGER PRIMARY KEY AUTOINCREMENT,
-                        SeriesTitle TEXT NOT NULL UNIQUE,
-                        SearchSeriesTitle TEXT
-                    )
-                    """);
-            statement.execute("""
-                    CREATE TABLE IF NOT EXISTS Genres (
-                        GenreCode TEXT PRIMARY KEY,
-                        ParentCode TEXT,
-                        FB2Code TEXT,
-                        GenreAlias TEXT NOT NULL,
-                        GenreSource TEXT
-                    )
-                    """);
-            statement.execute("""
-                    CREATE TABLE IF NOT EXISTS Authors (
-                        AuthorID INTEGER PRIMARY KEY AUTOINCREMENT,
-                        LastName TEXT NOT NULL,
-                        FirstName TEXT,
-                        MiddleName TEXT,
-                        SearchName TEXT
-                    )
-                    """);
-            statement.execute("""
-                    CREATE TABLE IF NOT EXISTS Books (
-                        BookID INTEGER PRIMARY KEY AUTOINCREMENT,
-                        LibID TEXT NOT NULL,
-                        Title TEXT NOT NULL,
-                        SeriesID INTEGER,
-                        SeqNumber INTEGER,
-                        UpdateDate TEXT NOT NULL,
-                        LibRate INTEGER NOT NULL DEFAULT 0,
-                        Lang TEXT,
-                        Folder TEXT,
-                        FileName TEXT NOT NULL,
-                        ArchiveEntry TEXT NOT NULL DEFAULT '',
-                        InsideNo INTEGER NOT NULL DEFAULT 0,
-                        Ext TEXT,
-                        BookSize INTEGER,
-                        IsLocal INTEGER NOT NULL DEFAULT 1,
-                        IsDeleted INTEGER NOT NULL DEFAULT 0,
-                        KeyWords TEXT,
-                        Rate INTEGER NOT NULL DEFAULT 0,
-                        Progress INTEGER NOT NULL DEFAULT 0,
-                        Annotation TEXT,
-                        Review TEXT,
-                        ExtraInfo TEXT,
-                        SearchTitle TEXT,
-                        SearchLang TEXT,
-                        SearchFolder TEXT,
-                        SearchFileName TEXT,
-                        SearchExt TEXT,
-                        SearchKeyWords TEXT,
-                        SearchAnnotation TEXT,
-                        FOREIGN KEY (SeriesID) REFERENCES Series(SeriesID)
-                    )
-                    """);
-            statement.execute("""
-                    CREATE TABLE IF NOT EXISTS Genre_List (
-                        GenreCode TEXT NOT NULL,
-                        BookID INTEGER NOT NULL,
-                        PRIMARY KEY (BookID, GenreCode),
-                        FOREIGN KEY (BookID) REFERENCES Books(BookID) ON DELETE CASCADE,
-                        FOREIGN KEY (GenreCode) REFERENCES Genres(GenreCode)
-                    )
-                    """);
-            statement.execute("""
-                    CREATE TABLE IF NOT EXISTS Author_List (
-                        AuthorID INTEGER NOT NULL,
-                        BookID INTEGER NOT NULL,
-                        PRIMARY KEY (BookID, AuthorID),
-                        FOREIGN KEY (BookID) REFERENCES Books(BookID) ON DELETE CASCADE,
-                        FOREIGN KEY (AuthorID) REFERENCES Authors(AuthorID)
-                    )
-                    """);
-            statement.execute("""
-                    CREATE TABLE IF NOT EXISTS Groups (
-                        GroupID INTEGER PRIMARY KEY AUTOINCREMENT,
-                        GroupName TEXT NOT NULL UNIQUE
-                    )
-                    """);
-            statement.execute("""
-                    CREATE TABLE IF NOT EXISTS BookGroups (
-                        GroupID INTEGER NOT NULL,
-                        BookID INTEGER NOT NULL,
-                        PRIMARY KEY (GroupID, BookID),
-                        FOREIGN KEY (GroupID) REFERENCES Groups(GroupID) ON DELETE CASCADE,
-                        FOREIGN KEY (BookID) REFERENCES Books(BookID) ON DELETE CASCADE
-                    )
-                    """);
-            statement.execute("CREATE INDEX IF NOT EXISTS IXBooks_Title ON Books (Title)");
-            statement.execute("CREATE INDEX IF NOT EXISTS IXBooks_FileName ON Books (FileName)");
-            statement.execute("CREATE INDEX IF NOT EXISTS IXAuthors_SearchName ON Authors (SearchName)");
-            statement.execute("CREATE INDEX IF NOT EXISTS IXSeries_SearchSeriesTitle ON Series (SearchSeriesTitle)");
-            statement.execute("CREATE INDEX IF NOT EXISTS IXGenreList_GenreCode_BookID ON Genre_List (GenreCode, BookID)");
-            statement.execute("CREATE INDEX IF NOT EXISTS IXAuthorList_AuthorID_BookID ON Author_List (AuthorID, BookID)");
-            statement.execute("CREATE INDEX IF NOT EXISTS IXBookGroups_GroupID_BookID ON BookGroups (GroupID, BookID)");
-        }
-        addColumnIfMissing("Books", "ArchiveEntry", "TEXT NOT NULL DEFAULT ''");
-        addColumnIfMissing("Books", "Review", "TEXT");
-        addColumnIfMissing("Books", "ExtraInfo", "TEXT");
-        addColumnIfMissing("Genres", "GenreSource", "TEXT");
-        seedDefaultSettings();
-    }
-
+    @Override
     public int importBooks(List<Fb2Book> books) {
-        int imported = 0;
+        if (books == null || books.isEmpty()) {
+            return 0;
+        }
+        String insertBookSql = """
+                INSERT INTO Books (Title, SeriesID, SequenceNumber, Language, FileName, Folder, ArchiveEntry, FileSize, Keywords, Annotation, Rate, Progress, UpdateDate)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?);
+                """;
+        String insertBookAuthorSql = "INSERT OR IGNORE INTO BookAuthors (BookID, AuthorID) VALUES (?, ?);";
+        String insertBookGenreSql = "INSERT OR IGNORE INTO BookGenres (BookID, GenreCode) VALUES (?, ?);";
+
+        int savedCount = 0;
         try {
             connection.setAutoCommit(false);
-            for (Fb2Book book : books) {
-                upsertBook(book);
-                imported++;
-            }
-            connection.commit();
-            return imported;
-        } catch (SQLException e) {
-            rollbackQuietly();
-            throw new IllegalStateException("Import failed", e);
-        } finally {
-            try {
+            try (PreparedStatement psBook = connection.prepareStatement(insertBookSql, Statement.RETURN_GENERATED_KEYS);
+                 PreparedStatement psBookAuthor = connection.prepareStatement(insertBookAuthorSql);
+                 PreparedStatement psBookGenre = connection.prepareStatement(insertBookGenreSql)) {
+
+                for (Fb2Book fb2Book : books) {
+                    Long seriesId = null;
+                    if (fb2Book.series() != null && !fb2Book.series().isBlank()) {
+                        seriesId = getOrInsertSeries(fb2Book.series());
+                    }
+
+                    psBook.setString(1, fb2Book.title());
+                    if (seriesId == null) {
+                        psBook.setNull(2, Types.INTEGER);
+                    } else {
+                        psBook.setLong(2, seriesId);
+                    }
+                    if (fb2Book.sequenceNumber() == null) {
+                        psBook.setNull(3, Types.INTEGER);
+                    } else {
+                        psBook.setInt(3, fb2Book.sequenceNumber());
+                    }
+                    psBook.setString(4, fb2Book.language());
+                    psBook.setString(5, fb2Book.sourcePath().getFileName().toString());
+                    psBook.setString(6, fb2Book.sourcePath().getParent() == null ? "" : fb2Book.sourcePath().getParent().toString());
+                    psBook.setString(7, fb2Book.archiveEntry());
+                    psBook.setLong(8, fb2Book.fileSize());
+                    psBook.setString(9, fb2Book.keywords());
+                    psBook.setString(10, fb2Book.annotation());
+                    psBook.setString(11, LocalDateTime.now().toString());
+                    psBook.executeUpdate();
+
+                    long bookId;
+                    try (ResultSet keys = psBook.getGeneratedKeys()) {
+                        if (keys.next()) {
+                            bookId = keys.getLong(1);
+                        } else {
+                            continue;
+                        }
+                    }
+
+                    for (Author author : fb2Book.authors()) {
+                        long authorId = getOrInsertAuthor(author);
+                        psBookAuthor.setLong(1, bookId);
+                        psBookAuthor.setLong(2, authorId);
+                        psBookAuthor.addBatch();
+                    }
+                    psBookAuthor.executeBatch();
+
+                    for (String genre : fb2Book.genres()) {
+                        if (genre != null && !genre.isBlank()) {
+                            psBookGenre.setLong(1, bookId);
+                            psBookGenre.setString(2, genre.trim());
+                            psBookGenre.addBatch();
+                        }
+                    }
+                    psBookGenre.executeBatch();
+                    savedCount++;
+                }
+                connection.commit();
+            } catch (SQLException e) {
+                connection.rollback();
+                throw e;
+            } finally {
                 connection.setAutoCommit(true);
-            } catch (SQLException ignored) {
             }
+        } catch (SQLException e) {
+            throw new IllegalStateException("Error importing books", e);
         }
+        return savedCount;
     }
 
-    private void upsertBook(Fb2Book book) throws SQLException {
-        long seriesId = book.series().isBlank() ? 0 : findOrCreateSeries(book.series());
-        Path source = book.sourcePath();
-        String fileName = source == null ? "unknown.fb2" : source.getFileName().toString();
-        String folder = source == null || source.getParent() == null ? "" : source.getParent().toString();
-        String archiveEntry = book.archiveEntry();
-        String ext = extension(archiveEntry.isBlank() ? fileName : archiveEntry);
-        String libId = source == null ? fileName : source.toAbsolutePath() + "!" + archiveEntry;
-
-        Long existingBookId = findBookByLibId(libId);
-        long bookId;
-        if (existingBookId == null) {
-            try (PreparedStatement ps = connection.prepareStatement("""
-                    INSERT INTO Books (
-                        LibID, Title, SeriesID, SeqNumber, UpdateDate, Lang, Folder, FileName, InsideNo,
-                        ArchiveEntry, Ext, BookSize, IsLocal, KeyWords, Annotation, SearchTitle, SearchLang,
-                        SearchFolder, SearchFileName, SearchExt, SearchKeyWords, SearchAnnotation
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, Statement.RETURN_GENERATED_KEYS)) {
-                bindBook(ps, book, libId, seriesId, folder, fileName, archiveEntry, ext);
-                ps.executeUpdate();
-                try (ResultSet keys = ps.getGeneratedKeys()) {
-                    if (!keys.next()) {
-                        throw new SQLException("No generated BookID returned");
-                    }
-                    bookId = keys.getLong(1);
+    private Long getOrInsertSeries(String seriesName) throws SQLException {
+        String trimmed = seriesName.trim();
+        if (globalSeriesCache.containsKey(trimmed)) {
+            return globalSeriesCache.get(trimmed);
+        }
+        String select = "SELECT SeriesID FROM Series WHERE Name = ?;";
+        try (PreparedStatement ps = connection.prepareStatement(select)) {
+            ps.setString(1, trimmed);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    long id = rs.getLong(1);
+                    globalSeriesCache.put(trimmed, id);
+                    return id;
                 }
             }
-        } else {
-            bookId = existingBookId;
-            try (PreparedStatement ps = connection.prepareStatement("""
-                    UPDATE Books SET
-                        Title = ?, SeriesID = ?, SeqNumber = ?, UpdateDate = ?, Lang = ?, Folder = ?,
-                        FileName = ?, ArchiveEntry = ?, Ext = ?, BookSize = ?, KeyWords = ?, Annotation = ?,
-                        SearchTitle = ?, SearchLang = ?, SearchFolder = ?, SearchFileName = ?,
-                        SearchExt = ?, SearchKeyWords = ?, SearchAnnotation = ?
-                    WHERE BookID = ?
-                    """)) {
-                bindBookUpdate(ps, book, seriesId, folder, fileName, archiveEntry, ext, bookId);
-                ps.executeUpdate();
-            }
-            deleteLinks(bookId);
         }
-
-        for (Author author : book.authors()) {
-            long authorId = findOrCreateAuthor(author);
-            try (PreparedStatement ps = connection.prepareStatement("INSERT OR IGNORE INTO Author_List (AuthorID, BookID) VALUES (?, ?)")) {
-                ps.setLong(1, authorId);
-                ps.setLong(2, bookId);
-                ps.executeUpdate();
-            }
-        }
-        for (String genre : book.genres()) {
-            String value = resolveGenreCode(genre == null || genre.isBlank() ? "unknown" : genre.trim());
-            try (PreparedStatement ps = connection.prepareStatement("INSERT OR IGNORE INTO Genre_List (GenreCode, BookID) VALUES (?, ?)")) {
-                ps.setString(1, value);
-                ps.setLong(2, bookId);
-                ps.executeUpdate();
-            }
-        }
-    }
-
-    private void bindBook(PreparedStatement ps, Fb2Book book, String libId, long seriesId, String folder, String fileName, String archiveEntry, String ext) throws SQLException {
-        ps.setString(1, libId);
-        ps.setString(2, fallback(book.title(), fileName));
-        setNullableLong(ps, 3, seriesId);
-        setNullableInteger(ps, 4, book.sequenceNumber());
-        ps.setString(5, LocalDateTime.now().toString());
-        ps.setString(6, book.language());
-        ps.setString(7, folder);
-        ps.setString(8, fileName);
-        ps.setString(9, archiveEntry);
-        ps.setString(10, ext);
-        ps.setLong(11, book.fileSize());
-        ps.setString(12, book.keywords());
-        ps.setString(13, book.annotation());
-        ps.setString(14, normalize(book.title()));
-        ps.setString(15, normalize(book.language()));
-        ps.setString(16, normalize(folder));
-        ps.setString(17, normalize(fileName));
-        ps.setString(18, normalize(ext));
-        ps.setString(19, normalize(book.keywords()));
-        ps.setString(20, normalize(book.annotation()));
-    }
-
-    private void bindBookUpdate(PreparedStatement ps, Fb2Book book, long seriesId, String folder, String fileName, String archiveEntry, String ext, long bookId) throws SQLException {
-        ps.setString(1, fallback(book.title(), fileName));
-        setNullableLong(ps, 2, seriesId);
-        setNullableInteger(ps, 3, book.sequenceNumber());
-        ps.setString(4, LocalDateTime.now().toString());
-        ps.setString(5, book.language());
-        ps.setString(6, folder);
-        ps.setString(7, fileName);
-        ps.setString(8, archiveEntry);
-        ps.setString(9, ext);
-        ps.setLong(10, book.fileSize());
-        ps.setString(11, book.keywords());
-        ps.setString(12, book.annotation());
-        ps.setString(13, normalize(book.title()));
-        ps.setString(14, normalize(book.language()));
-        ps.setString(15, normalize(folder));
-        ps.setString(16, normalize(fileName));
-        ps.setString(17, normalize(ext));
-        ps.setString(18, normalize(book.keywords()));
-        ps.setString(19, normalize(book.annotation()));
-        ps.setLong(20, bookId);
-    }
-
-    private void deleteLinks(long bookId) throws SQLException {
-        try (PreparedStatement ps = connection.prepareStatement("DELETE FROM Author_List WHERE BookID = ?")) {
-            ps.setLong(1, bookId);
+        String insert = "INSERT INTO Series (Name) VALUES (?);";
+        try (PreparedStatement ps = connection.prepareStatement(insert, Statement.RETURN_GENERATED_KEYS)) {
+            ps.setString(1, trimmed);
             ps.executeUpdate();
+            try (ResultSet keys = ps.getGeneratedKeys()) {
+                if (keys.next()) {
+                    long id = keys.getLong(1);
+                    globalSeriesCache.put(trimmed, id);
+                    return id;
+                }
+            }
         }
-        try (PreparedStatement ps = connection.prepareStatement("DELETE FROM Genre_List WHERE BookID = ?")) {
-            ps.setLong(1, bookId);
-            ps.executeUpdate();
-        }
+        return null;
     }
 
+    private long getOrInsertAuthor(Author author) throws SQLException {
+        String key = (author.lastName() + "|" + author.firstName() + "|" + author.middleName()).toLowerCase(Locale.ROOT);
+        if (globalAuthorCache.containsKey(key)) {
+            return globalAuthorCache.get(key);
+        }
+        String select = "SELECT AuthorID FROM Authors WHERE LastName = ? AND FirstName = ? AND MiddleName = ?;";
+        try (PreparedStatement ps = connection.prepareStatement(select)) {
+            ps.setString(1, author.lastName().trim());
+            ps.setString(2, author.firstName() == null ? "" : author.firstName().trim());
+            ps.setString(3, author.middleName() == null ? "" : author.middleName().trim());
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    long id = rs.getLong(1);
+                    globalAuthorCache.put(key, id);
+                    return id;
+                }
+            }
+        }
+        String insert = "INSERT INTO Authors (FirstName, MiddleName, LastName) VALUES (?, ?, ?);";
+        try (PreparedStatement ps = connection.prepareStatement(insert, Statement.RETURN_GENERATED_KEYS)) {
+            ps.setString(1, author.firstName() == null ? "" : author.firstName().trim());
+            ps.setString(2, author.middleName() == null ? "" : author.middleName().trim());
+            ps.setString(3, author.lastName().trim());
+            ps.executeUpdate();
+            try (ResultSet keys = ps.getGeneratedKeys()) {
+                if (keys.next()) {
+                    long id = keys.getLong(1);
+                    globalAuthorCache.put(key, id);
+                    return id;
+                }
+            }
+        }
+        return 0;
+    }
+
+    @Override
     public List<Book> searchBooks(String query) {
-        String normalized = normalize(query);
+        return searchBooks(query, 500);
+    }
+
+    @Override
+    public List<Book> searchBooks(String query, int limit) {
+        List<Book> result = new ArrayList<>();
+        if (query == null || query.isBlank()) {
+            return result;
+        }
+
+        // ІДЕАЛЬНИЙ УНІВЕРСАЛЬНИЙ ШВИДКИЙ ПОШУК: Шукає і за назвою книги, і за прізвищем/іменем автора одночасно.
+        // LOWER() гарантує 100% ігнорування регістру (Caps Lock) для будь-якої кирилиці та ASCII.
         String sql = """
-                SELECT b.*, s.SeriesTitle
-                FROM Books b
-                LEFT JOIN Series s ON s.SeriesID = b.SeriesID
-                WHERE (? = 0 OR b.IsDeleted = 0)
-                  AND (? = 0 OR b.IsLocal = 1)
-                  AND (? = ''
-                    OR b.SearchTitle LIKE ?
-                    OR b.SearchFileName LIKE ?
-                    OR b.SearchLang LIKE ?
-                    OR b.SearchKeyWords LIKE ?
-                    OR b.SearchAnnotation LIKE ?
-                    OR EXISTS (
-                        SELECT 1 FROM Author_List al JOIN Authors a ON a.AuthorID = al.AuthorID
-                        WHERE al.BookID = b.BookID AND a.SearchName LIKE ?
-                    )
-                    OR EXISTS (
-                        SELECT 1 FROM Genre_List gl JOIN Genres g ON g.GenreCode = gl.GenreCode
-                        WHERE gl.BookID = b.BookID AND UPPER(g.GenreAlias) LIKE ?
-                    )
-                    OR EXISTS (
-                        SELECT 1 FROM BookGroups bg JOIN Groups g ON g.GroupID = bg.GroupID
-                        WHERE bg.BookID = b.BookID AND UPPER(g.GroupName) LIKE ?
-                    )
-                  )
-                ORDER BY b.Title COLLATE NOCASE, b.FileName COLLATE NOCASE
+            SELECT DISTINCT b.BookID, b.Title, b.SeriesID, b.SequenceNumber, b.Language, b.FileName, 
+                            b.Folder, b.ArchiveEntry, b.FileSize, b.Keywords, b.Annotation, 
+                            b.Rate, b.Progress, b.UpdateDate, s.Name AS SeriesName
+            FROM Books b
+            LEFT JOIN Series s ON b.SeriesID = s.SeriesID
+            LEFT JOIN BookAuthors ba ON b.BookID = ba.BookID
+            LEFT JOIN Authors a ON ba.AuthorID = a.AuthorID
+            WHERE LOWER(b.Title) LIKE ? 
+               OR LOWER(a.LastName) LIKE ? 
+               OR LOWER(a.FirstName) LIKE ? 
+               OR LOWER(a.LastName || ' ' || a.FirstName) LIKE ?
+            ORDER BY b.BookID DESC
+            LIMIT ?;
+            """;
+
+        String searchPattern = "%" + query.trim().toLowerCase(java.util.Locale.ROOT) + "%";
+
+        try (PreparedStatement ps = connection.prepareStatement(sql)) {
+            ps.setString(1, searchPattern);
+            ps.setString(2, searchPattern);
+            ps.setString(3, searchPattern);
+            ps.setString(4, searchPattern);
+            ps.setInt(5, limit <= 0 ? 500 : limit);
+
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    long id = rs.getLong("BookID");
+                    String title = rs.getString("Title");
+                    String series = rs.getString("SeriesName");
+                    Integer seqNumber = rs.getObject("SequenceNumber") != null ? rs.getInt("SequenceNumber") : null;
+                    String lang = rs.getString("Language");
+                    String fileName = rs.getString("FileName");
+                    String folder = rs.getString("Folder");
+                    String archiveEntry = rs.getString("ArchiveEntry");
+                    long fileSize = rs.getLong("FileSize");
+                    String keywords = rs.getString("Keywords");
+                    String annotation = rs.getString("Annotation");
+                    int rate = rs.getInt("Rate");
+                    int progress = rs.getInt("Progress");
+
+                    String uDateStr = rs.getString("UpdateDate");
+                    LocalDateTime updateDate = uDateStr != null ? LocalDateTime.parse(uDateStr) : LocalDateTime.now();
+
+                    // Обов'язково заповнюємо авторів та жанри, щоб вони відображалися у стовпчиках таблиці UI
+                    List<Author> authors = getAuthorsForBook(id);
+                    List<String> genres = getGenresForBook(id);
+
+                    result.add(new Book(
+                            id, title, authors, genres, series, seqNumber, lang,
+                            fileName, folder, archiveEntry, fileSize, keywords, annotation,
+                            rate, progress, updateDate
+                    ));
+                }
+            }
+        } catch (SQLException e) {
+            throw new IllegalStateException("Error executing comprehensive quick search", e);
+        }
+        return result;
+    }
+
+    @Override
+    public List<Book> searchBooksPaged(String query, int pageSize, int pageNumber) {
+        return searchBooks(query, pageSize * Math.max(1, pageNumber + 1)).stream()
+                .skip((long) pageSize * Math.max(0, pageNumber))
+                .limit(pageSize)
+                .toList();
+    }
+
+    public List<Book> searchAdvanced(SearchCriteria criteria) {
+        List<Book> result = new ArrayList<>();
+        StringBuilder sql = new StringBuilder("""
+                SELECT DISTINCT b.BookID, b.Title, b.SeriesID, b.SequenceNumber, b.Language, b.FileName, 
+                       b.Folder, b.ArchiveEntry, b.FileSize, b.Keywords, b.Annotation, 
+                       b.Rate, b.Progress, b.UpdateDate, s.Name AS SeriesName FROM Books b
+                LEFT JOIN Series s ON b.SeriesID = s.SeriesID
+                WHERE 1=1
+                """);
+        List<Object> params = new ArrayList<>();
+
+        if (criteria.title() != null && !criteria.title().isBlank()) {
+            sql.append(" AND b.Title LIKE ?");
+            params.add("%" + criteria.title().trim() + "%");
+        }
+        if (criteria.series() != null && !criteria.series().isBlank()) {
+            sql.append(" AND s.Name LIKE ?");
+            params.add("%" + criteria.series().trim() + "%");
+        }
+        if (criteria.language() != null && !criteria.language().isBlank()) {
+            sql.append(" AND b.Language = ?");
+            params.add(criteria.language().trim());
+        }
+        if (criteria.rateFrom() != null) {
+            sql.append(" AND b.Rate >= ?");
+            params.add(criteria.rateFrom());
+        }
+        if (criteria.rateTo() != null) {
+            sql.append(" AND b.Rate <= ?");
+            params.add(criteria.rateTo());
+        }
+        if (criteria.progressFrom() != null) {
+            sql.append(" AND b.Progress >= ?");
+            params.add(criteria.progressFrom());
+        }
+        if (criteria.progressTo() != null) {
+            sql.append(" AND b.Progress <= ?");
+            params.add(criteria.progressTo());
+        }
+        if (criteria.sizeFrom() != null) {
+            sql.append(" AND b.FileSize >= ?");
+            params.add(criteria.sizeFrom());
+        }
+        if (criteria.sizeTo() != null) {
+            sql.append(" AND b.FileSize <= ?");
+            params.add(criteria.sizeTo());
+        }
+        if (criteria.keywords() != null && !criteria.keywords().isBlank()) {
+            sql.append(" AND b.Keywords LIKE ?");
+            params.add("%" + criteria.keywords().trim() + "%");
+        }
+        if (criteria.annotation() != null && !criteria.annotation().isBlank()) {
+            sql.append(" AND b.Annotation LIKE ?");
+            params.add("%" + criteria.annotation().trim() + "%");
+        }
+        if (criteria.group() != null && !criteria.group().isBlank()) {
+            sql.append(" AND b.BookID IN (SELECT BookID FROM BookGroups WHERE GroupName = ?)");
+            params.add(criteria.group().trim());
+        }
+        if (criteria.genre() != null && !criteria.genre().isBlank()) {
+            sql.append(" AND b.BookID IN (SELECT BookID FROM BookGenres WHERE GenreCode LIKE ?)");
+            params.add("%" + criteria.genre().trim() + "%");
+        }
+        if (criteria.author() != null && !criteria.author().isBlank()) {
+            sql.append("""
+                     AND b.BookID IN (
+                        SELECT ba.BookID FROM BookAuthors ba
+                        JOIN Authors a ON ba.AuthorID = a.AuthorID
+                        WHERE (a.LastName || ' ' || a.FirstName || ' ' || a.MiddleName) LIKE ?
+                     )
+                    """);
+            params.add("%" + criteria.author().trim() + "%");
+        }
+
+        sql.append(" ORDER BY b.BookID DESC LIMIT 1000;");
+        try (PreparedStatement ps = connection.prepareStatement(sql.toString())) {
+            for (int i = 0; i < params.size(); i++) {
+                ps.setObject(i + 1, params.get(i));
+            }
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    long id = rs.getLong("BookID");
+                    String title = rs.getString("Title");
+                    String series = rs.getString("SeriesName");
+                    Integer seqNum = rs.getObject("SequenceNumber") != null ? rs.getInt("SequenceNumber") : null;
+                    String lang = rs.getString("Language");
+                    String fName = rs.getString("FileName");
+                    String folder = rs.getString("Folder");
+                    String archEntry = rs.getString("ArchiveEntry");
+                    long size = rs.getLong("FileSize");
+                    String kw = rs.getString("Keywords");
+                    String ann = rs.getString("Annotation");
+                    int rate = rs.getInt("Rate");
+                    int prog = rs.getInt("Progress");
+                    String uDateStr = rs.getString("UpdateDate");
+                    LocalDateTime uDate = uDateStr != null ? LocalDateTime.parse(uDateStr) : LocalDateTime.now();
+
+                    List<Author> authors = getAuthorsForBook(id);
+                    List<String> genres = getGenresForBook(id);
+                    result.add(new Book(id, title, authors, genres, series, seqNum, lang, fName, folder, archEntry, size, kw, ann, rate, prog, uDate));
+                }
+            }
+        } catch (SQLException e) {
+            throw new IllegalStateException("Error executing search query", e);
+        }
+        return result;
+    }
+
+    private List<Author> getAuthorsForBook(long bookId) throws SQLException {
+        List<Author> list = new ArrayList<>();
+        String sql = """
+                SELECT a.* FROM Authors a
+                JOIN BookAuthors ba ON a.AuthorID = ba.AuthorID
+                WHERE ba.BookID = ?;
                 """;
         try (PreparedStatement ps = connection.prepareStatement(sql)) {
-            String pattern = "%" + normalized + "%";
-            ps.setInt(1, hideDeleted() ? 1 : 0);
-            ps.setInt(2, showLocalOnly() ? 1 : 0);
-            ps.setString(3, normalized);
-            for (int i = 4; i <= 11; i++) {
-                ps.setString(i, pattern);
-            }
+            ps.setLong(1, bookId);
             try (ResultSet rs = ps.executeQuery()) {
-                List<Book> books = new ArrayList<>();
                 while (rs.next()) {
-                    books.add(mapBook(rs));
-                }
-                return books;
-            }
-        } catch (SQLException e) {
-            throw new IllegalStateException("Cannot search books", e);
-        }
-    }
-
-    public List<String> listAuthors() {
-        return listValues("""
-                SELECT a.SearchName AS value
-                FROM Authors a
-                JOIN Author_List al ON al.AuthorID = a.AuthorID
-                JOIN Books b ON b.BookID = al.BookID
-                WHERE (? = 0 OR b.IsDeleted = 0)
-                  AND (? = 0 OR b.IsLocal = 1)
-                GROUP BY a.AuthorID
-                ORDER BY a.SearchName COLLATE NOCASE
-                """);
-    }
-
-    public List<String> listSeries() {
-        return listValues("""
-                SELECT s.SeriesTitle AS value
-                FROM Series s
-                JOIN Books b ON b.SeriesID = s.SeriesID
-                WHERE (? = 0 OR b.IsDeleted = 0)
-                  AND (? = 0 OR b.IsLocal = 1)
-                GROUP BY s.SeriesID
-                ORDER BY s.SeriesTitle COLLATE NOCASE
-                """);
-    }
-
-    public List<String> listGenres() {
-        return listValues("""
-                SELECT g.GenreAlias AS value
-                FROM Genres g
-                JOIN Genre_List gl ON gl.GenreCode = g.GenreCode
-                JOIN Books b ON b.BookID = gl.BookID
-                WHERE (? = 0 OR b.IsDeleted = 0)
-                  AND (? = 0 OR b.IsLocal = 1)
-                GROUP BY g.GenreCode
-                ORDER BY g.GenreAlias COLLATE NOCASE
-                """);
-    }
-
-    public Map<String, Integer> statistics() {
-        Map<String, Integer> values = new LinkedHashMap<>();
-        values.put("Books", count("Books"));
-        values.put("Authors", count("Authors"));
-        values.put("Series", count("Series"));
-        values.put("Genres", count("Genres"));
-        values.put("Groups", count("Groups"));
-        return values;
-    }
-
-    public Map<String, String> settings() {
-        Map<String, String> settings = new LinkedHashMap<>();
-        try (PreparedStatement ps = connection.prepareStatement("SELECT Key, Value FROM Settings ORDER BY Key");
-             ResultSet rs = ps.executeQuery()) {
-            while (rs.next()) {
-                settings.put(rs.getString("Key"), rs.getString("Value"));
-            }
-            return settings;
-        } catch (SQLException e) {
-            throw new IllegalStateException("Cannot load settings", e);
-        }
-    }
-
-    public String setting(String key, String fallback) {
-        try (PreparedStatement ps = connection.prepareStatement("SELECT Value FROM Settings WHERE Key = ?")) {
-            ps.setString(1, key);
-            try (ResultSet rs = ps.executeQuery()) {
-                return rs.next() ? rs.getString("Value") : fallback;
-            }
-        } catch (SQLException e) {
-            throw new IllegalStateException("Cannot load setting: " + key, e);
-        }
-    }
-
-    public void putSetting(String key, String value) {
-        try (PreparedStatement ps = connection.prepareStatement("""
-                INSERT INTO Settings(Key, Value)
-                VALUES(?, ?)
-                ON CONFLICT(Key) DO UPDATE SET Value = excluded.Value
-                """)) {
-            ps.setString(1, key);
-            ps.setString(2, value == null ? "" : value);
-            ps.executeUpdate();
-        } catch (SQLException e) {
-            throw new IllegalStateException("Cannot save setting: " + key, e);
-        }
-    }
-
-    public List<String> listGroups() {
-        return listValues("""
-                SELECT g.GroupName AS value
-                FROM Groups g
-                JOIN BookGroups bg ON bg.GroupID = g.GroupID
-                JOIN Books b ON b.BookID = bg.BookID
-                WHERE (? = 0 OR b.IsDeleted = 0)
-                  AND (? = 0 OR b.IsLocal = 1)
-                GROUP BY g.GroupID
-                ORDER BY g.GroupName COLLATE NOCASE
-                """);
-    }
-
-    public void updateBook(long bookId, BookEdit edit) {
-        try {
-            connection.setAutoCommit(false);
-            long seriesId = edit.series() == null || edit.series().isBlank() ? 0 : findOrCreateSeries(edit.series());
-            try (PreparedStatement ps = connection.prepareStatement("""
-                    UPDATE Books SET
-                        Title = ?, SeriesID = ?, SeqNumber = ?, UpdateDate = ?, Lang = ?,
-                        KeyWords = ?, Annotation = ?, Rate = ?, Progress = ?,
-                        SearchTitle = ?, SearchLang = ?, SearchKeyWords = ?, SearchAnnotation = ?
-                    WHERE BookID = ?
-                    """)) {
-                ps.setString(1, fallback(edit.title(), "Untitled"));
-                setNullableLong(ps, 2, seriesId);
-                setNullableInteger(ps, 3, edit.sequenceNumber());
-                ps.setString(4, LocalDateTime.now().toString());
-                ps.setString(5, edit.language());
-                ps.setString(6, edit.keywords());
-                ps.setString(7, edit.annotation());
-                ps.setInt(8, clamp(edit.rate(), 0, 5));
-                ps.setInt(9, clamp(edit.progress(), 0, 100));
-                ps.setString(10, normalize(edit.title()));
-                ps.setString(11, normalize(edit.language()));
-                ps.setString(12, normalize(edit.keywords()));
-                ps.setString(13, normalize(edit.annotation()));
-                ps.setLong(14, bookId);
-                ps.executeUpdate();
-            }
-            deleteLinks(bookId);
-            for (Author author : edit.authors()) {
-                long authorId = findOrCreateAuthor(author);
-                try (PreparedStatement ps = connection.prepareStatement("INSERT OR IGNORE INTO Author_List (AuthorID, BookID) VALUES (?, ?)")) {
-                    ps.setLong(1, authorId);
-                    ps.setLong(2, bookId);
-                    ps.executeUpdate();
-                }
-            }
-            for (String genre : edit.genres()) {
-                if (genre == null || genre.isBlank()) {
-                    continue;
-                }
-                String value = resolveGenreCode(genre.trim());
-                try (PreparedStatement ps = connection.prepareStatement("INSERT OR IGNORE INTO Genre_List (GenreCode, BookID) VALUES (?, ?)")) {
-                    ps.setString(1, value);
-                    ps.setLong(2, bookId);
-                    ps.executeUpdate();
-                }
-            }
-            connection.commit();
-        } catch (SQLException e) {
-            rollbackQuietly();
-            throw new IllegalStateException("Cannot update book", e);
-        } finally {
-            try {
-                connection.setAutoCommit(true);
-            } catch (SQLException ignored) {
-            }
-        }
-    }
-
-    public void setRate(long bookId, int rate) {
-        updateSingleInt(bookId, "Rate", clamp(rate, 0, 5));
-    }
-
-    public void setProgress(long bookId, int progress) {
-        updateSingleInt(bookId, "Progress", clamp(progress, 0, 100));
-    }
-
-    public String getReview(long bookId) {
-        try (PreparedStatement ps = connection.prepareStatement("SELECT Review FROM Books WHERE BookID = ?")) {
-            ps.setLong(1, bookId);
-            try (ResultSet rs = ps.executeQuery()) {
-                return rs.next() ? fallback(rs.getString("Review"), "") : "";
-            }
-        } catch (SQLException e) {
-            throw new IllegalStateException("Cannot load review", e);
-        }
-    }
-
-    public void setReview(long bookId, String review) {
-        try (PreparedStatement ps = connection.prepareStatement("UPDATE Books SET Review = ?, UpdateDate = ? WHERE BookID = ?")) {
-            ps.setString(1, review == null ? "" : review);
-            ps.setString(2, LocalDateTime.now().toString());
-            ps.setLong(3, bookId);
-            ps.executeUpdate();
-        } catch (SQLException e) {
-            throw new IllegalStateException("Cannot save review", e);
-        }
-    }
-
-    public boolean hideDeleted() {
-        return Boolean.parseBoolean(setting("view.hideDeleted", "true"));
-    }
-
-    public void setHideDeleted(boolean hideDeleted) {
-        putSetting("view.hideDeleted", Boolean.toString(hideDeleted));
-    }
-
-    public boolean showLocalOnly() {
-        return Boolean.parseBoolean(setting("view.showLocalOnly", "false"));
-    }
-
-    public void setShowLocalOnly(boolean showLocalOnly) {
-        putSetting("view.showLocalOnly", Boolean.toString(showLocalOnly));
-    }
-
-    public String authorFilterType() {
-        return setting("filter.authorType", "all");
-    }
-
-    public void setAuthorFilterType(String authorFilterType) {
-        putSetting("filter.authorType", authorFilterType == null || authorFilterType.isBlank() ? "all" : authorFilterType.trim());
-    }
-
-    public String seriesFilterType() {
-        return setting("filter.seriesType", "all");
-    }
-
-    public void setSeriesFilterType(String seriesFilterType) {
-        putSetting("filter.seriesType", seriesFilterType == null || seriesFilterType.isBlank() ? "all" : seriesFilterType.trim());
-    }
-
-    public void addBookToGroup(long bookId, String groupName) {
-        if (groupName == null || groupName.isBlank()) {
-            return;
-        }
-        try {
-            long groupId = findOrCreateGroup(groupName.trim());
-            try (PreparedStatement ps = connection.prepareStatement("INSERT OR IGNORE INTO BookGroups (GroupID, BookID) VALUES (?, ?)")) {
-                ps.setLong(1, groupId);
-                ps.setLong(2, bookId);
-                ps.executeUpdate();
-            }
-        } catch (SQLException e) {
-            throw new IllegalStateException("Cannot add book to group", e);
-        }
-    }
-
-    public void removeBookFromGroup(long bookId, String groupName) {
-        if (groupName == null || groupName.isBlank()) {
-            return;
-        }
-        try (PreparedStatement ps = connection.prepareStatement("""
-                DELETE FROM BookGroups
-                WHERE BookID = ? AND GroupID IN (SELECT GroupID FROM Groups WHERE GroupName = ?)
-                """)) {
-            ps.setLong(1, bookId);
-            ps.setString(2, groupName.trim());
-            ps.executeUpdate();
-        } catch (SQLException e) {
-            throw new IllegalStateException("Cannot remove book from group", e);
-        }
-    }
-
-    public List<String> groupsForBook(long bookId) {
-        try (PreparedStatement ps = connection.prepareStatement("""
-                SELECT g.GroupName AS value
-                FROM Groups g
-                JOIN BookGroups bg ON bg.GroupID = g.GroupID
-                WHERE bg.BookID = ?
-                ORDER BY g.GroupName COLLATE NOCASE
-                """)) {
-            ps.setLong(1, bookId);
-            try (ResultSet rs = ps.executeQuery()) {
-                List<String> groups = new ArrayList<>();
-                while (rs.next()) {
-                    groups.add(rs.getString("value"));
-                }
-                return groups;
-            }
-        } catch (SQLException e) {
-            throw new IllegalStateException("Cannot load book groups", e);
-        }
-    }
-
-    private void updateSingleInt(long bookId, String column, int value) {
-        try (PreparedStatement ps = connection.prepareStatement("UPDATE Books SET " + column + " = ?, UpdateDate = ? WHERE BookID = ?")) {
-            ps.setInt(1, value);
-            ps.setString(2, LocalDateTime.now().toString());
-            ps.setLong(3, bookId);
-            ps.executeUpdate();
-        } catch (SQLException e) {
-            throw new IllegalStateException("Cannot update " + column, e);
-        }
-    }
-
-    private int count(String table) {
-        try (Statement statement = connection.createStatement();
-             ResultSet rs = statement.executeQuery("SELECT COUNT(*) FROM " + table)) {
-            return rs.next() ? rs.getInt(1) : 0;
-        } catch (SQLException e) {
-            throw new IllegalStateException("Cannot count " + table, e);
-        }
-    }
-
-    private List<String> listValues(String sql) {
-        try (PreparedStatement ps = connection.prepareStatement(sql)) {
-            ps.setInt(1, hideDeleted() ? 1 : 0);
-            ps.setInt(2, showLocalOnly() ? 1 : 0);
-            try (ResultSet rs = ps.executeQuery()) {
-            List<String> values = new ArrayList<>();
-            while (rs.next()) {
-                values.add(rs.getString("value"));
-            }
-            return values;
-            }
-        } catch (SQLException e) {
-            throw new IllegalStateException("Cannot load list", e);
-        }
-    }
-
-    private Book mapBook(ResultSet rs) throws SQLException {
-        long id = rs.getLong("BookID");
-        return new Book(
-                id,
-                rs.getString("Title"),
-                loadAuthors(id),
-                loadGenres(id),
-                rs.getString("SeriesTitle"),
-                nullableInt(rs, "SeqNumber"),
-                rs.getString("Lang"),
-                rs.getString("FileName"),
-                rs.getString("Folder"),
-                rs.getString("ArchiveEntry"),
-                rs.getLong("BookSize"),
-                rs.getString("KeyWords"),
-                rs.getString("Annotation"),
-                rs.getInt("Rate"),
-                rs.getInt("Progress"),
-                LocalDateTime.parse(rs.getString("UpdateDate"))
-        );
-    }
-
-    private List<Author> loadAuthors(long bookId) throws SQLException {
-        try (PreparedStatement ps = connection.prepareStatement("""
-                SELECT a.* FROM Authors a
-                JOIN Author_List al ON al.AuthorID = a.AuthorID
-                WHERE al.BookID = ?
-                ORDER BY a.LastName, a.FirstName, a.MiddleName
-                """)) {
-            ps.setLong(1, bookId);
-            try (ResultSet rs = ps.executeQuery()) {
-                List<Author> authors = new ArrayList<>();
-                while (rs.next()) {
-                    authors.add(new Author(
+                    list.add(new Author(
                             rs.getLong("AuthorID"),
                             rs.getString("FirstName"),
                             rs.getString("MiddleName"),
                             rs.getString("LastName")
                     ));
                 }
-                return authors;
             }
         }
+        return list;
     }
 
-    private List<String> loadGenres(long bookId) throws SQLException {
-        try (PreparedStatement ps = connection.prepareStatement("""
-                SELECT g.GenreAlias FROM Genres g
-                JOIN Genre_List gl ON gl.GenreCode = g.GenreCode
-                WHERE gl.BookID = ?
-                ORDER BY g.GenreAlias
-                """)) {
+    private List<String> getGenresForBook(long bookId) throws SQLException {
+        List<String> list = new ArrayList<>();
+        String sql = "SELECT GenreCode FROM BookGenres WHERE BookID = ?;";
+        try (PreparedStatement ps = connection.prepareStatement(sql)) {
             ps.setLong(1, bookId);
             try (ResultSet rs = ps.executeQuery()) {
-                List<String> genres = new ArrayList<>();
                 while (rs.next()) {
-                    genres.add(rs.getString("GenreAlias"));
+                    list.add(rs.getString("GenreCode"));
                 }
-                return genres;
             }
         }
+        return list;
     }
 
-    private Long findBookByLibId(String libId) throws SQLException {
-        try (PreparedStatement ps = connection.prepareStatement("SELECT BookID FROM Books WHERE LibID = ?")) {
-            ps.setString(1, libId);
-            try (ResultSet rs = ps.executeQuery()) {
-                return rs.next() ? rs.getLong(1) : null;
+    @Override
+    public List<String> listAuthors() {
+        List<String> result = new ArrayList<>();
+        String sql = "SELECT LastName, FirstName, MiddleName FROM Authors ORDER BY LastName, FirstName;";
+        try (Statement statement = connection.createStatement();
+             ResultSet rs = statement.executeQuery(sql)) {
+            while (rs.next()) {
+                String ln = rs.getString("LastName");
+                String fn = rs.getString("FirstName");
+                String mn = rs.getString("MiddleName");
+                StringBuilder sb = new StringBuilder(ln);
+                if (fn != null && !fn.isBlank()) sb.append(" ").append(fn);
+                if (mn != null && !mn.isBlank()) sb.append(" ").append(mn);
+                result.add(sb.toString());
             }
-        }
-    }
-
-    private long findOrCreateSeries(String series) throws SQLException {
-        Long id = findLong("SELECT SeriesID FROM Series WHERE SearchSeriesTitle = ?", normalize(series));
-        if (id != null) {
-            return id;
-        }
-        try (PreparedStatement ps = connection.prepareStatement(
-                "INSERT INTO Series (SeriesTitle, SearchSeriesTitle) VALUES (?, ?)",
-                Statement.RETURN_GENERATED_KEYS)) {
-            ps.setString(1, series);
-            ps.setString(2, normalize(series));
-            ps.executeUpdate();
-            return generatedId(ps);
-        }
-    }
-
-    private long findOrCreateAuthor(Author author) throws SQLException {
-        String searchName = normalize(author.displayName());
-        Long id = findLong("SELECT AuthorID FROM Authors WHERE SearchName = ?", searchName);
-        if (id != null) {
-            return id;
-        }
-        try (PreparedStatement ps = connection.prepareStatement("""
-                INSERT INTO Authors (LastName, FirstName, MiddleName, SearchName)
-                VALUES (?, ?, ?, ?)
-                """, Statement.RETURN_GENERATED_KEYS)) {
-            ps.setString(1, fallback(author.lastName(), "Unknown"));
-            ps.setString(2, author.firstName());
-            ps.setString(3, author.middleName());
-            ps.setString(4, searchName);
-            ps.executeUpdate();
-            return generatedId(ps);
-        }
-    }
-
-    private String resolveGenreCode(String genre) throws SQLException {
-        if (genre == null || genre.isBlank()) {
-            return "unknown";
-        }
-        String byFb2 = findString("""
-                SELECT GenreCode
-                FROM Genres
-                WHERE FB2Code = ?
-                  AND GenreCode <> ?
-                ORDER BY GenreSource, GenreCode
-                LIMIT 1
-                """, genre, genre);
-        if (byFb2 != null && !byFb2.isBlank()) {
-            return byFb2;
-        }
-        Long byCode = findLong("SELECT COUNT(*) FROM Genres WHERE GenreCode = ?", genre);
-        if (byCode != null && byCode > 0) {
-            return genre;
-        }
-        findOrCreateGenre(genre);
-        return genre;
-    }
-
-    private void findOrCreateGenre(String genre) throws SQLException {
-        Long exists = findLong("SELECT COUNT(*) FROM Genres WHERE GenreCode = ?", genre);
-        if (exists != null && exists > 0) {
-            return;
-        }
-        try (PreparedStatement ps = connection.prepareStatement(
-                "INSERT INTO Genres (GenreCode, FB2Code, GenreAlias) VALUES (?, ?, ?)")) {
-            ps.setString(1, genre);
-            ps.setString(2, genre);
-            ps.setString(3, genre);
-            ps.executeUpdate();
-        }
-    }
-
-    public int importGenreList(List<GenreImport> genres, String source) {
-        try {
-            connection.setAutoCommit(false);
-            int imported = 0;
-            try (PreparedStatement ps = connection.prepareStatement("""
-                    INSERT INTO Genres (GenreCode, ParentCode, FB2Code, GenreAlias, GenreSource)
-                    VALUES (?, ?, ?, ?, ?)
-                    ON CONFLICT(GenreCode) DO UPDATE SET
-                        ParentCode = excluded.ParentCode,
-                        FB2Code = excluded.FB2Code,
-                        GenreAlias = excluded.GenreAlias,
-                        GenreSource = excluded.GenreSource
-                    """)) {
-                for (GenreImport genre : genres) {
-                    ps.setString(1, genre.code());
-                    ps.setString(2, genre.parentCode());
-                    ps.setString(3, genre.fb2Code());
-                    ps.setString(4, genre.alias());
-                    ps.setString(5, source);
-                    ps.addBatch();
-                    imported++;
-                }
-                ps.executeBatch();
-            }
-            migrateGenreLinksToImportedCodes(source);
-            connection.commit();
-            return imported;
         } catch (SQLException e) {
-            rollbackQuietly();
-            throw new IllegalStateException("Cannot import genres", e);
-        } finally {
-            try {
-                connection.setAutoCommit(true);
-            } catch (SQLException ignored) {
+            throw new IllegalStateException(e);
+        }
+        return result;
+    }
+
+    @Override
+    public List<String> listSeries() {
+        List<String> result = new ArrayList<>();
+        String sql = "SELECT Name FROM Series ORDER BY Name;";
+        try (Statement statement = connection.createStatement();
+             ResultSet rs = statement.executeQuery(sql)) {
+            while (rs.next()) {
+                result.add(rs.getString("Name"));
             }
+        } catch (SQLException e) {
+            throw new IllegalStateException(e);
         }
+        return result;
     }
 
-    private void migrateGenreLinksToImportedCodes(String source) throws SQLException {
-        try (PreparedStatement insert = connection.prepareStatement("""
-                INSERT OR IGNORE INTO Genre_List (GenreCode, BookID)
-                SELECT g.GenreCode, gl.BookID
-                FROM Genre_List gl
-                JOIN Genres g ON g.FB2Code = gl.GenreCode
-                WHERE g.GenreSource = ?
-                  AND g.FB2Code IS NOT NULL
-                  AND g.FB2Code <> ''
-                  AND g.GenreCode <> gl.GenreCode
-                """)) {
-            insert.setString(1, source);
-            insert.executeUpdate();
+    @Override
+    public List<String> listGenres() {
+        List<String> result = new ArrayList<>();
+        String sql = "SELECT Code FROM Genres ORDER BY Code;";
+        try (Statement statement = connection.createStatement();
+             ResultSet rs = statement.executeQuery(sql)) {
+            while (rs.next()) {
+                result.add(rs.getString("Code"));
+            }
+        } catch (SQLException e) {
+            throw new IllegalStateException(e);
         }
-        try (PreparedStatement delete = connection.prepareStatement("""
-                DELETE FROM Genre_List
-                WHERE EXISTS (
-                    SELECT 1
-                    FROM Genres g
-                    WHERE g.GenreSource = ?
-                      AND g.FB2Code = Genre_List.GenreCode
-                      AND g.FB2Code IS NOT NULL
-                      AND g.FB2Code <> ''
-                      AND g.GenreCode <> Genre_List.GenreCode
-                )
-                """)) {
-            delete.setString(1, source);
-            delete.executeUpdate();
-        }
+        return result;
     }
 
-    private long findOrCreateGroup(String groupName) throws SQLException {
-        Long id = findLong("SELECT GroupID FROM Groups WHERE GroupName = ?", groupName);
-        if (id != null) {
-            return id;
+    @Override
+    public List<String> listGroups() {
+        List<String> result = new ArrayList<>();
+        String sql = "SELECT DISTINCT GroupName FROM BookGroups ORDER BY GroupName;";
+        try (Statement statement = connection.createStatement();
+             ResultSet rs = statement.executeQuery(sql)) {
+            while (rs.next()) {
+                result.add(rs.getString("GroupName"));
+            }
+        } catch (SQLException e) {
+            throw new IllegalStateException(e);
         }
-        try (PreparedStatement ps = connection.prepareStatement(
-                "INSERT INTO Groups (GroupName) VALUES (?)",
-                Statement.RETURN_GENERATED_KEYS)) {
-            ps.setString(1, groupName);
-            ps.executeUpdate();
-            return generatedId(ps);
-        }
+        return result;
     }
 
-    private Long findLong(String sql, String value) throws SQLException {
+    @Override
+    public Map<String, Integer> statistics() {
+        Map<String, Integer> stats = new LinkedHashMap<>();
+        try (Statement stmt = connection.createStatement()) {
+            try (ResultSet rs = stmt.executeQuery("SELECT COUNT(*) FROM Books;")) {
+                if (rs.next()) stats.put("Всього книг", rs.getInt(1));
+            }
+            try (ResultSet rs = stmt.executeQuery("SELECT COUNT(*) FROM Authors;")) {
+                if (rs.next()) stats.put("Всього авторів", rs.getInt(1));
+            }
+            try (ResultSet rs = stmt.executeQuery("SELECT COUNT(*) FROM Series;")) {
+                if (rs.next()) stats.put("Всього серій", rs.getInt(1));
+            }
+        } catch (SQLException e) {
+            throw new IllegalStateException(e);
+        }
+        return stats;
+    }
+
+    @Override
+    public Map<String, String> settings() {
+        Map<String, String> map = new java.util.HashMap<>();
+        String sql = "SELECT Key, Value FROM Settings;";
+        try (Statement stmt = connection.createStatement();
+             ResultSet rs = stmt.executeQuery(sql)) {
+            while (rs.next()) {
+                map.put(rs.getString("Key"), rs.getString("Value"));
+            }
+        } catch (SQLException ignored) {}
+        return map;
+    }
+
+    @Override
+    public String setting(String key, String fallback) {
+        String sql = "SELECT Value FROM Settings WHERE Key = ?;";
         try (PreparedStatement ps = connection.prepareStatement(sql)) {
-            ps.setString(1, value);
+            ps.setString(1, key);
             try (ResultSet rs = ps.executeQuery()) {
-                return rs.next() ? rs.getLong(1) : null;
+                if (rs.next()) {
+                    String val = rs.getString("Value");
+                    return val == null ? fallback : val;
+                }
             }
-        }
+        } catch (SQLException ignored) {}
+        return fallback;
     }
 
-    private String findString(String sql, String value) throws SQLException {
+    @Override
+    public void putSetting(String key, String value) {
+        String sql = "INSERT OR REPLACE INTO Settings (Key, Value) VALUES (?, ?);";
         try (PreparedStatement ps = connection.prepareStatement(sql)) {
-            ps.setString(1, value);
-            try (ResultSet rs = ps.executeQuery()) {
-                return rs.next() ? rs.getString(1) : null;
-            }
-        }
-    }
-
-    private String findString(String sql, String firstValue, String secondValue) throws SQLException {
-        try (PreparedStatement ps = connection.prepareStatement(sql)) {
-            ps.setString(1, firstValue);
-            ps.setString(2, secondValue);
-            try (ResultSet rs = ps.executeQuery()) {
-                return rs.next() ? rs.getString(1) : null;
-            }
-        }
-    }
-
-    private void seedDefaultSettings() throws SQLException {
-        seedSetting("fb2.folderTemplate", "{author}/{series}");
-        seedSetting("fb2.fileTemplate", "{title}");
-        seedSetting("import.readFb2", "true");
-        seedSetting("import.readZip", "true");
-        seedSetting("import.readInpx", "true");
-        seedSetting("view.hideDeleted", "true");
-        seedSetting("view.showLocalOnly", "false");
-        seedSetting("filter.authorType", "all");
-        seedSetting("filter.seriesType", "all");
-    }
-
-    private void seedSetting(String key, String value) throws SQLException {
-        try (PreparedStatement ps = connection.prepareStatement("INSERT OR IGNORE INTO Settings(Key, Value) VALUES(?, ?)")) {
             ps.setString(1, key);
             ps.setString(2, value);
             ps.executeUpdate();
+        } catch (SQLException e) {
+            throw new IllegalStateException(e);
         }
     }
 
-    private long generatedId(PreparedStatement ps) throws SQLException {
-        try (ResultSet keys = ps.getGeneratedKeys()) {
-            if (!keys.next()) {
-                throw new SQLException("No generated id returned");
+    @Override
+    public void updateBook(long bookId, BookEdit edit) {
+        String sql = """
+                UPDATE Books SET Title = ?, SequenceNumber = ?, Language = ?, Keywords = ?, Annotation = ?, Rate = ?, Progress = ?, UpdateDate = ?
+                WHERE BookID = ?;
+                """;
+        try (PreparedStatement ps = connection.prepareStatement(sql)) {
+            ps.setString(1, edit.title());
+            if (edit.sequenceNumber() == null) {
+                ps.setNull(2, Types.INTEGER);
+            } else {
+                ps.setInt(2, edit.sequenceNumber());
             }
-            return keys.getLong(1);
+            ps.setString(3, edit.language());
+            ps.setString(4, edit.keywords());
+            ps.setString(5, edit.annotation());
+            ps.setInt(6, edit.rate());
+            ps.setInt(7, edit.progress());
+            ps.setString(8, LocalDateTime.now().toString());
+            ps.setLong(9, bookId);
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            throw new IllegalStateException(e);
         }
     }
 
-    private static void setNullableLong(PreparedStatement ps, int index, long value) throws SQLException {
-        if (value == 0) {
-            ps.setNull(index, Types.INTEGER);
-        } else {
-            ps.setLong(index, value);
+    @Override
+    public void setRate(long bookId, int rate) {
+        String sql = "UPDATE Books SET Rate = ?, UpdateDate = ? WHERE BookID = ?;";
+        try (PreparedStatement ps = connection.prepareStatement(sql)) {
+            ps.setInt(1, rate);
+            ps.setString(2, LocalDateTime.now().toString());
+            ps.setLong(3, bookId);
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            throw new IllegalStateException(e);
         }
     }
 
-    private static void setNullableInteger(PreparedStatement ps, int index, Integer value) throws SQLException {
-        if (value == null) {
-            ps.setNull(index, Types.INTEGER);
-        } else {
-            ps.setInt(index, value);
+    @Override
+    public void setProgress(long bookId, int progress) {
+        String sql = "UPDATE Books SET Progress = ?, UpdateDate = ? WHERE BookID = ?;";
+        try (PreparedStatement ps = connection.prepareStatement(sql)) {
+            ps.setInt(1, progress);
+            ps.setString(2, LocalDateTime.now().toString());
+            ps.setLong(3, bookId);
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            throw new IllegalStateException(e);
         }
     }
 
-    private static Integer nullableInt(ResultSet rs, String column) throws SQLException {
-        int value = rs.getInt(column);
-        return rs.wasNull() ? null : value;
+    @Override
+    public String getReview(long bookId) {
+        return setting("book.review." + bookId, "");
     }
 
-    private static String normalize(String value) {
-        return value == null ? "" : value.trim().toUpperCase(Locale.ROOT);
+    @Override
+    public void setReview(long bookId, String review) {
+        putSetting("book.review." + bookId, review);
     }
 
-    private static String fallback(String value, String fallback) {
-        return value == null || value.isBlank() ? fallback : value.trim();
+    @Override
+    public void addBookToGroup(long bookId, String groupName) {
+        String sql = "INSERT OR IGNORE INTO BookGroups (BookID, GroupName) VALUES (?, ?);";
+        try (PreparedStatement ps = connection.prepareStatement(sql)) {
+            ps.setLong(1, bookId);
+            ps.setString(2, groupName.trim());
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            throw new IllegalStateException(e);
+        }
     }
 
-    private static String extension(String fileName) {
-        int dot = fileName.lastIndexOf('.');
-        return dot < 0 ? "" : fileName.substring(dot + 1).toLowerCase(Locale.ROOT);
+    @Override
+    public void removeBookFromGroup(long bookId, String groupName) {
+        String sql = "DELETE FROM BookGroups WHERE BookID = ? AND GroupName = ?;";
+        try (PreparedStatement ps = connection.prepareStatement(sql)) {
+            ps.setLong(1, bookId);
+            ps.setString(2, groupName.trim());
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            throw new IllegalStateException(e);
+        }
     }
 
-    private static int clamp(int value, int min, int max) {
-        return Math.max(min, Math.min(max, value));
-    }
-
-    private void addColumnIfMissing(String table, String column, String definition) throws SQLException {
-        try (Statement statement = connection.createStatement();
-             ResultSet rs = statement.executeQuery("PRAGMA table_info(" + table + ")")) {
-            while (rs.next()) {
-                if (column.equalsIgnoreCase(rs.getString("name"))) {
-                    return;
+    @Override
+    public List<String> groupsForBook(long bookId) {
+        List<String> list = new ArrayList<>();
+        String sql = "SELECT GroupName FROM BookGroups WHERE BookID = ? ORDER BY GroupName;";
+        try (PreparedStatement ps = connection.prepareStatement(sql)) {
+            ps.setLong(1, bookId);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    list.add(rs.getString("GroupName"));
                 }
             }
+        } catch (SQLException e) {
+            throw new IllegalStateException(e);
         }
-        try (Statement statement = connection.createStatement()) {
-            statement.execute("ALTER TABLE " + table + " ADD COLUMN " + column + " " + definition);
-        }
+        return list;
     }
 
-    public record GenreImport(String code, String parentCode, String fb2Code, String alias) {
+    @Override
+    public boolean hideDeleted() {
+        return Boolean.parseBoolean(setting("ui.hideDeleted", "false"));
     }
 
-    private void rollbackQuietly() {
+    @Override
+    public void setHideDeleted(boolean hideDeleted) {
+        putSetting("ui.hideDeleted", String.valueOf(hideDeleted));
+    }
+
+    @Override
+    public boolean showLocalOnly() {
+        return Boolean.parseBoolean(setting("ui.showLocalOnly", "false"));
+    }
+
+    @Override
+    public void setShowLocalOnly(boolean showLocalOnly) {
+        putSetting("ui.showLocalOnly", String.valueOf(showLocalOnly));
+    }
+
+    @Override
+    public String authorFilterType() {
+        return setting("ui.authorFilterType", "ALL");
+    }
+
+    @Override
+    public void setAuthorFilterType(String type) {
+        putSetting("ui.authorFilterType", type);
+    }
+
+    @Override
+    public String seriesFilterType() {
+        return seriesFilterType;
+    }
+
+    @Override
+    public void setSeriesFilterType(String seriesFilterType) {
+        this.seriesFilterType = seriesFilterType == null ? "all" : seriesFilterType;
+    }
+
+    @Override
+    public String genreFilterType() {
+        return genreFilterType;
+    }
+
+    @Override
+    public void setGenreFilterType(String genreFilterType) {
+        this.genreFilterType = genreFilterType == null ? "all" : genreFilterType;
+    }
+
+    @Override
+    public int importGenreList(List<GenreImport> genres, String source) {
+        if (genres == null || genres.isEmpty()) {
+            return 0;
+        }
+
+        // Повне очищення довідника перед імпортом для запобігання дублів
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("DELETE FROM Genres;");
+        } catch (SQLException e) {
+            throw new IllegalStateException("Failed to clear Genres table", e);
+        }
+
+        String sql = "INSERT OR REPLACE INTO Genres (Code, ParentCode, Fb2Code, Alias) VALUES (?, ?, ?, ?);";
+        int count = 0;
+
         try {
-            connection.rollback();
-        } catch (SQLException ignored) {
+            connection.setAutoCommit(false);
+            try (PreparedStatement ps = connection.prepareStatement(sql)) {
+                for (GenreImport g : genres) {
+                    if (g.code() == null || g.code().isBlank()) {
+                        continue;
+                    }
+
+                    String rawLine = g.code().trim();
+
+                    // Ігноруємо коментарі у файлі, якщо вони раптом пролізли через UI парсер
+                    if (rawLine.startsWith("#")) {
+                        continue;
+                    }
+
+                    String code = null;
+                    String parentCode = null;
+                    String fb2Code = null;
+                    String alias = null;
+
+                    // НАДІЙНИЙ ПАРСЕР .GLST СТРУКТУРИ:
+                    // Приклад 1: "0.1 Фантастика"
+                    // Приклад 2: "0.1.1 sf_history;Альтернативная история"
+                    int firstSpace = rawLine.indexOf(' ');
+                    if (firstSpace != -1) {
+                        fb2Code = rawLine.substring(0, firstSpace).trim(); // "0.1" або "0.1.1"
+                        String rest = rawLine.substring(firstSpace).trim(); // "Фантастика" або "sf_history;Альтернативная история"
+
+                        if (rest.contains(";")) {
+                            // Рядок другого рівня з описом конкретного піджанру книги
+                            String[] parts = rest.split(";", 2);
+                            code = parts[0].trim();  // "sf_history" -> це те, що шукає FB2 книга
+                            alias = parts[1].trim(); // "Альтернативная история"
+                        } else {
+                            // Кореневий ієрархічний рядок (напр. "0.1 Фантастика")
+                            code = fb2Code; // Використовуємо ієрархічний числовий індекс як тимчасовий код
+                            alias = rest;   // "Фантастика"
+                        }
+                    } else {
+                        // Якщо прокинувся чистий неформатований код
+                        code = rawLine;
+                        fb2Code = rawLine;
+                        alias = rawLine;
+                    }
+
+                    // Визначення ParentCode на основі ієрархічних крапок (напр. для "0.1.1" батьком буде "0.1")
+                    if (fb2Code.contains(".")) {
+                        int lastDot = fb2Code.lastIndexOf('.');
+                        if (lastDot > 0) {
+                            parentCode = fb2Code.substring(0, lastDot);
+                        }
+                    }
+
+                    // Перевіряємо, чи отримали ми валідні значення
+                    if (code == null || code.isBlank()) {
+                        continue;
+                    }
+
+                    ps.setString(1, code);
+
+                    if (parentCode == null || parentCode.isBlank()) {
+                        ps.setNull(2, Types.VARCHAR);
+                    } else {
+                        ps.setString(2, parentCode);
+                    }
+
+                    ps.setString(3, fb2Code);
+                    ps.setString(4, alias);
+
+                    ps.addBatch();
+                    count++;
+                }
+                ps.executeBatch();
+                connection.commit();
+            } catch (SQLException e) {
+                connection.rollback();
+                throw e;
+            } finally {
+                connection.setAutoCommit(true);
+            }
+        } catch (SQLException e) {
+            throw new IllegalStateException("Error executing stable batch genre import from UI data", e);
+        }
+        return count;
+    }
+
+    public void saveSearchPreset(String name, SearchCriteria criteria) {
+        String sql = """
+                INSERT OR REPLACE INTO SearchPresets (Name, Title, Author, Genre, Series, Language, RateFrom, RateTo, ProgressFrom, ProgressTo, SizeFrom, SizeTo, Keywords, Annotation, GroupName)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                """;
+        try (PreparedStatement ps = connection.prepareStatement(sql)) {
+            ps.setString(1, name);
+            ps.setString(2, criteria.title());
+            ps.setString(3, criteria.author());
+            ps.setString(4, criteria.genre());
+            ps.setString(5, criteria.series());
+            ps.setString(6, criteria.language());
+            setNullableInteger(ps, 7, criteria.rateFrom());
+            setNullableInteger(ps, 8, criteria.rateTo());
+            setNullableInteger(ps, 9, criteria.progressFrom());
+            setNullableInteger(ps, 10, criteria.progressTo());
+            setNullableLong(ps, 11, criteria.sizeFrom());
+            setNullableLong(ps, 12, criteria.sizeTo());
+            ps.setString(13, criteria.keywords());
+            ps.setString(14, criteria.annotation());
+            ps.setString(15, criteria.group());
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            throw new IllegalStateException("Cannot save search preset", e);
+        }
+    }
+
+    private void setNullableInteger(PreparedStatement ps, int idx, Integer val) throws SQLException {
+        if (val == null) ps.setNull(idx, Types.INTEGER);
+        else ps.setInt(idx, val);
+    }
+
+    private void setNullableLong(PreparedStatement ps, int idx, Long val) throws SQLException {
+        if (val == null) ps.setNull(idx, Types.INTEGER);
+        else ps.setLong(idx, val);
+    }
+
+    public List<SearchPreset> loadSearchPresets() {
+        List<SearchPreset> result = new ArrayList<>();
+        String sql = "SELECT * FROM SearchPresets ORDER BY Name;";
+        try (Statement stmt = connection.createStatement();
+             ResultSet rs = stmt.executeQuery(sql)) {
+            while (rs.next()) {
+                SearchCriteria criteria = new SearchCriteria(
+                        rs.getString("Title"),
+                        rs.getString("Author"),
+                        rs.getString("Genre"),
+                        rs.getString("Series"),
+                        rs.getString("Language"),
+                        (Integer) rs.getObject("RateFrom"),
+                        (Integer) rs.getObject("RateTo"),
+                        (Integer) rs.getObject("ProgressFrom"),
+                        (Integer) rs.getObject("ProgressTo"),
+                        (Long) rs.getObject("SizeFrom"),
+                        (Long) rs.getObject("SizeTo"),
+                        null, null,
+                        rs.getString("Keywords"),
+                        rs.getString("Annotation"),
+                        rs.getString("GroupName")
+                );
+                result.add(new SearchPreset(rs.getLong("PresetID"), rs.getString("Name"), criteria));
+            }
+        } catch (SQLException ignored) {}
+        return result;
+    }
+
+    public void deleteSearchPreset(long presetId) {
+        String sql = "DELETE FROM SearchPresets WHERE PresetID = ?;";
+        try (PreparedStatement ps = connection.prepareStatement(sql)) {
+            ps.setLong(1, presetId);
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    public void renameSearchPreset(long presetId, String newName) {
+        String sql = "UPDATE SearchPresets SET Name = ? WHERE PresetID = ?;";
+        try (PreparedStatement ps = connection.prepareStatement(sql)) {
+            ps.setString(1, newName);
+            ps.setLong(2, presetId);
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            throw new IllegalStateException(e);
         }
     }
 
     private void closeQuietly() {
-        try {
-            close();
-        } catch (Exception ignored) {
+        if (connection != null) {
+            try {
+                connection.close();
+            } catch (SQLException ignored) {}
         }
     }
 
     @Override
     public void close() {
-        if (connection == null) {
-            return;
-        }
-        try {
-            connection.close();
-        } catch (SQLException ignored) {
-        } finally {
-            connection = null;
-        }
+        closeQuietly();
     }
+
+    public record GenreImport(String code, String parentCode, String fb2Code, String alias) {}
 }

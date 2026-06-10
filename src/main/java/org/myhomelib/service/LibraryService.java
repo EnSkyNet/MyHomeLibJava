@@ -10,6 +10,7 @@ import org.myhomelib.reader.BookContentReader;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Consumer;
@@ -37,9 +38,31 @@ public final class LibraryService {
         if (!isEnabled("import.readInpx")) {
             return new ImportResult(List.of(), 0);
         }
-        List<Fb2Book> books = new InpxImporter().importFile(inpxFile, status);
-        int saved = database.importBooks(books);
-        return new ImportResult(books, saved);
+
+        int[] totalSaved = {0};
+        // Збільшуємо початкову місткість буфера до 20 000
+        List<Fb2Book> batch = new ArrayList<>(20000);
+
+        new InpxImporter().importFile(
+                inpxFile,
+                book -> {
+                    batch.add(book);
+                    // Скидаємо в базу кожні 20 000 книг
+                    if (batch.size() >= 20000) {
+                        totalSaved[0] += database.importBooks(batch);
+                        batch.clear();
+                    }
+                },
+                status
+        );
+
+        // Записуємо залишок
+        if (!batch.isEmpty()) {
+            totalSaved[0] += database.importBooks(batch);
+            batch.clear();
+        }
+
+        return new ImportResult(List.of(), totalSaved[0]);
     }
 
     public int importGenreList(Path file, String source) throws Exception {
