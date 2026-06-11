@@ -1,12 +1,7 @@
 package org.myhomelib.model;
 
-import java.util.List;
-
 public record BookEdit(
         String title,
-        List<Author> authors,
-        List<String> genres,
-        String series,
         Integer sequenceNumber,
         String language,
         String keywords,
@@ -14,4 +9,10 @@ public record BookEdit(
         int rate,
         int progress
 ) {
+    public BookEdit {
+        title = title != null ? title.trim() : "";
+        language = language != null ? language.trim() : "";
+        keywords = keywords != null ? keywords.trim() : "";
+        annotation = annotation != null ? annotation.trim() : "";
+    }
 }

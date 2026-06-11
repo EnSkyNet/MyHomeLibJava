@@ -3,270 +3,271 @@ package org.myhomelib.app;
 import javafx.application.Application;
 import javafx.application.Platform;
 import javafx.collections.FXCollections;
-import javafx.collections.ObservableList;
 import javafx.geometry.Insets;
-import javafx.geometry.Orientation;
+import javafx.geometry.Pos;
 import javafx.scene.Scene;
 import javafx.scene.control.*;
 import javafx.scene.control.cell.PropertyValueFactory;
 import javafx.scene.layout.*;
+import javafx.stage.DirectoryChooser;
 import javafx.stage.FileChooser;
 import javafx.stage.Stage;
+import org.myhomelib.db.BookCollection;
 import org.myhomelib.db.Database;
 import org.myhomelib.model.Book;
+import org.myhomelib.model.SearchCriteria;
 import org.myhomelib.service.LibraryService;
+import org.myhomelib.ui.ReaderStage;
 
 import java.io.File;
-import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.List;
 
 public final class MainFXApp extends Application {
-    private Database database;
+    private BookCollection database;
     private LibraryService libraryService;
 
-    private TreeView<String> navigationTree;
-    private TableView<Book> booksTable;
-    private Label titleDetailsLabel;
-    private TextArea annotationDetailsArea;
-    private Label statusLabel;
-    private TextField searchField;
+    private TableView<Book> bookTable;
+    private TextField titleField;
+    private TextField authorField;
+    private TextField genreField;
+    private TextField seriesField;
 
-    private final ObservableList<Book> masterBookList = FXCollections.observableArrayList();
-
-    public static void main(String[] args) {
-        launch(args);
-    }
+    private Label totalBooksLabel;
+    private Label totalAuthorsLabel;
+    private Label totalGenresLabel;
+    private TextArea logArea;
 
     @Override
     public void start(Stage primaryStage) {
-        Path dbPath = Path.of("myhomelib-java.db");
-        database = new Database(dbPath);
-        libraryService = new LibraryService(database);
+        // Явне створення конкретної реалізації з відкриттям підключення до файлу SQLite
+        Database db = new Database(Paths.get("library.db"));
+        db.open(Paths.get("library.db"));
 
-        primaryStage.setTitle("MyHomeLib - JavaFX Edition");
+        // Зберігаємо посилання через інтерфейс BookCollection
+        this.database = db;
+        this.libraryService = new LibraryService(this.database);
 
-        // --- ВЕРХНЯ ЧАСТИНА: TOOLBAR ---
-        ToolBar toolBar = new ToolBar();
-        Button importInpxBtn = new Button("Імпорт .inpx");
-        Button settingsBtn = new Button("Налаштування");
-        Button statsBtn = new Button("Статистика");
-        searchField = new TextField();
-        searchField.setPromptText("Швидкий пошук книги...");
-        searchField.setPrefWidth(250);
+        primaryStage.setTitle("MyHomeLibJava — Сучасна Бібліотека JavaFX");
 
-        toolBar.getItems().addAll(importInpxBtn, settingsBtn, statsBtn, new Separator(), searchField);
+        // 1. ВЕРХНЯ ПАНЕЛЬ: ФІЛЬТРАЦІЯ / ПОШУК
+        GridPane searchGrid = new GridPane();
+        searchGrid.setHgap(10);
+        searchGrid.setVgap(8);
+        searchGrid.setPadding(new Insets(12));
+        searchGrid.setStyle("-fx-background-color: #f8f9fa; -fx-border-color: #e9ecef; -fx-border-width: 0 0 1 0;");
 
-        // --- ЛІВА ЧАСТИНА: НАВІГАЦІЙНЕ ДЕРЕВО (Автори, Серії, Жанри) ---
-        TreeItem<String> rootNode = new TreeItem<>("Бібліотека");
-        rootNode.setExpanded(true);
+        searchGrid.add(new Label("Назва книги:"), 0, 0);
+        titleField = new TextField();
+        titleField.setPromptText("Введіть назву...");
+        searchGrid.add(titleField, 1, 0);
 
-        TreeItem<String> authorsNode = new TreeItem<>("Автори");
-        TreeItem<String> seriesNode = new TreeItem<>("Серії");
-        TreeItem<String> genresNode = new TreeItem<>("Жанри");
-        rootNode.getChildren().addAll(authorsNode, seriesNode, genresNode);
+        searchGrid.add(new Label("Автор:"), 2, 0);
+        authorField = new TextField();
+        authorField.setPromptText("Ім'я автора...");
+        searchGrid.add(authorField, 3, 0);
 
-        navigationTree = new TreeView<>(rootNode);
-        navigationTree.getSelectionModel().selectedItemProperty().addListener((observable, oldValue, newValue) -> {
-            if (newValue != null && newValue.isLeaf()) {
-                handleTreeNavigation(newValue.getParent().getValue(), newValue.getValue());
-            }
+        searchGrid.add(new Label("Жанр:"), 0, 1);
+        genreField = new TextField();
+        genreField.setPromptText("Код або назва жанру...");
+        searchGrid.add(genreField, 1, 1);
+
+        searchGrid.add(new Label("Серія:"), 2, 1);
+        seriesField = new TextField();
+        seriesField.setPromptText("Назва серії...");
+        searchGrid.add(seriesField, 3, 1);
+
+        Button btnSearch = new Button("Шукати в базі");
+        btnSearch.setStyle("-fx-background-color: #2980b9; -fx-text-fill: white; -fx-font-weight: bold;");
+        btnSearch.setOnAction(e -> handleSearch());
+        searchGrid.add(btnSearch, 4, 0);
+
+        Button btnReset = new Button("Скинути фільтр");
+        btnReset.setOnAction(e -> {
+            titleField.clear(); authorField.clear(); genreField.clear(); seriesField.clear();
+            handleSearch();
         });
+        searchGrid.add(btnReset, 4, 1);
 
-        // --- ЦЕНТРАЛЬНА ЧАСТИНА: ТАБЛИЦЯ КНИГ ---
-        booksTable = new TableView<>();
-        booksTable.setItems(masterBookList);
+        // 2. ЦЕНТРАЛЬНА ЧАСТИНА: ТАБЛИЦЯ КНИГ
+        bookTable = new TableView<>();
+        bookTable.setPlaceholder(new Label("Немає даних для відображення. Змініть критерії пошуку або виконайте імпорт."));
 
-        TableColumn<Book, String> authorCol = new TableColumn<>("Автор");
-        authorCol.setCellValueFactory(new PropertyValueFactory<>("authorsText"));
-        authorCol.setPrefWidth(150);
-
-        TableColumn<Book, String> seriesCol = new TableColumn<>("Серія");
-        seriesCol.setCellValueFactory(new PropertyValueFactory<>("series"));
-        seriesCol.setPrefWidth(120);
-
-        TableColumn<Book, Integer> seqCol = new TableColumn<>("№");
-        seqCol.setCellValueFactory(new PropertyValueFactory<>("sequenceNumber"));
-        seqCol.setPrefWidth(40);
+        TableColumn<Book, Long> idCol = new TableColumn<>("ID");
+        idCol.setCellValueFactory(new PropertyValueFactory<>("id"));
+        idCol.setPrefWidth(70);
 
         TableColumn<Book, String> titleCol = new TableColumn<>("Назва");
         titleCol.setCellValueFactory(new PropertyValueFactory<>("title"));
-        titleCol.setPrefWidth(220);
+        titleCol.setPrefWidth(300);
 
-        TableColumn<Book, Long> sizeCol = new TableColumn<>("Розмір");
-        sizeCol.setCellValueFactory(new PropertyValueFactory<>("fileSize"));
-        sizeCol.setPrefWidth(80);
+        TableColumn<Book, String> authorCol = new TableColumn<>("Автори");
+        authorCol.setCellValueFactory(new PropertyValueFactory<>("authorsText"));
+        authorCol.setPrefWidth(220);
 
-        TableColumn<Book, String> fileCol = new TableColumn<>("Файл");
-        fileCol.setCellValueFactory(new PropertyValueFactory<>("fileName"));
-        fileCol.setPrefWidth(120);
+        TableColumn<Book, String> genreCol = new TableColumn<>("Жанри");
+        genreCol.setCellValueFactory(new PropertyValueFactory<>("genresText"));
+        genreCol.setPrefWidth(180);
 
-        booksTable.getColumns().addAll(authorCol, seriesCol, seqCol, titleCol, sizeCol, fileCol);
-        booksTable.getSelectionModel().selectedItemProperty().addListener((obs, oldSelection, newSelection) -> {
-            if (newSelection != null) {
-                updateDetailsPanel(newSelection);
-            }
+        TableColumn<Book, String> langCol = new TableColumn<>("Мова");
+        langCol.setCellValueFactory(new PropertyValueFactory<>("language"));
+        langCol.setPrefWidth(60);
+
+        bookTable.getColumns().addAll(idCol, titleCol, authorCol, genreCol, langCol);
+
+        // Подвійний клік на рядок таблиці відкриває книгу в читалці
+        bookTable.setRowFactory(tv -> {
+            TableRow<Book> row = new TableRow<>();
+            row.setOnMouseClicked(event -> {
+                if (event.getClickCount() == 2 && (!row.isEmpty())) {
+                    openBookInReader(row.getItem());
+                }
+            });
+            return row;
         });
 
-        // --- НИЖНЯ/ПРАВА ЧАСТИНА: ДЕТАЛІ КНИГИ ---
-        VBox detailsPanel = new VBox(10);
-        detailsPanel.setPadding(new Insets(10));
-        detailsPanel.setStyle("-color-base: #f4f1ea; -fx-background-color: #f4f1ea;");
+        // 3. ЛІВА БІКОВА ПАНЕЛЬ: АНАЛІТИКА ТА ДІЇ
+        VBox leftPanel = new VBox(15);
+        leftPanel.setPadding(new Insets(12));
+        leftPanel.setPrefWidth(260);
+        leftPanel.setStyle("-fx-background-color: #f1f2f6; -fx-border-color: #dcdde1; -fx-border-width: 0 1 0 0;");
 
-        titleDetailsLabel = new Label("Назва книги не обрана");
-        titleDetailsLabel.setStyle("-fx-font-weight: bold; -fx-font-size: 14px;");
+        // Панель лічильників
+        VBox statsBox = new VBox(8);
+        statsBox.setStyle("-fx-background-color: white; -fx-border-color: #ced4da; -fx-padding: 10; -fx-border-radius: 4;");
+        Label statsTitle = new Label("Статистика бібліотеки:");
+        statsTitle.setStyle("-fx-font-weight: bold; -fx-text-fill: #2c3e50;");
+        totalBooksLabel = new Label("Книг: 0");
+        totalAuthorsLabel = new Label("Авторів: 0");
+        totalGenresLabel = new Label("Жанрів: 0");
+        statsBox.getChildren().addAll(statsTitle, totalBooksLabel, totalAuthorsLabel, totalGenresLabel);
 
-        annotationDetailsArea = new TextArea();
-        annotationDetailsArea.setEditable(false);
-        annotationDetailsArea.setWrapText(true);
-        annotationDetailsArea.setPromptText("Анотація відсутня");
-        VBox.setVgrow(annotationDetailsArea, Priority.ALWAYS);
+        // Панель журналу
+        VBox logBox = new VBox(5);
+        Label logTitle = new Label("Журнал операцій імпорту:");
+        logTitle.setStyle("-fx-font-weight: bold;");
+        logArea = new TextArea();
+        logArea.setEditable(false);
+        logArea.setPrefHeight(250);
+        logArea.setStyle("-fx-font-family: 'Monospaced'; -fx-font-size: 11px;");
+        logBox.getChildren().addAll(logTitle, logArea);
 
-        detailsPanel.getChildren().addAll(titleDetailsLabel, new Label("Анотація:"), annotationDetailsArea);
+        // Кнопки імпорту
+        Button btnImportFolder = new Button("Імпорт папки з FB2/ZIP");
+        btnImportFolder.setMaxWidth(Double.MAX_VALUE);
+        btnImportFolder.setStyle("-fx-background-color: #2ecc71; -fx-text-fill: white; -fx-font-weight: bold;");
+        btnImportFolder.setOnAction(e -> handleFolderImport(primaryStage));
 
-        // --- РОЗПОДІЛ ПАНЕЛЕЙ (SPLITPANES) ЯК НА МАКЕТІ ---
-        SplitPane horizontalSplit = new SplitPane();
-        horizontalSplit.setOrientation(Orientation.HORIZONTAL);
+        Button btnImportInpx = new Button("Імпорт метаданих INPX");
+        btnImportInpx.setMaxWidth(Double.MAX_VALUE);
+        btnImportInpx.setStyle("-fx-background-color: #e67e22; -fx-text-fill: white; -fx-font-weight: bold;");
+        btnImportInpx.setOnAction(e -> handleInpxImport(primaryStage));
 
-        SplitPane verticalCenterSplit = new SplitPane();
-        verticalCenterSplit.setOrientation(Orientation.VERTICAL);
-        verticalCenterSplit.getItems().addAll(booksTable, detailsPanel);
-        verticalCenterSplit.setDividerPositions(0.65);
+        leftPanel.getChildren().addAll(statsBox, logBox, new Separator(), btnImportFolder, btnImportInpx);
 
-        horizontalSplit.getItems().addAll(navigationTree, verticalCenterSplit);
-        horizontalSplit.setDividerPositions(0.25);
+        // 4. НИЖНЯ ПАНЕЛЬ: КЕРУВАННЯ ВИДІЛЕНУЮ КНИГОЮ
+        HBox bottomActions = new HBox(15);
+        bottomActions.setPadding(new Insets(10));
+        bottomActions.setAlignment(Pos.CENTER_RIGHT);
+        bottomActions.setStyle("-fx-background-color: #e9ecef;");
 
-        // --- НИЖНІЙ СТАТУС БАР ---
-        HBox statusBar = new HBox();
-        statusBar.setPadding(new Insets(5));
-        statusBar.setStyle("-fx-background-color: #e8e8e8;");
-        statusLabel = new Label("Програма готова до роботи.");
-        statusBar.getChildren().add(statusLabel);
+        Button btnRead = new Button("Читати виділену книгу");
+        btnRead.setStyle("-fx-background-color: #27ae60; -fx-text-fill: white; -fx-font-weight: bold; -fx-font-size: 13px;");
+        btnRead.setOnAction(e -> {
+            Book selected = bookTable.getSelectionModel().getSelectedItem();
+            if (selected != null) {
+                openBookInReader(selected);
+            } else {
+                showWarning("Попередження", "Будь ласка, виберіть книгу зі списку для читання.");
+            }
+        });
+        bottomActions.getChildren().add(btnRead);
 
-        // --- ГОЛОВНИЙ ЛЕЯУТ ---
+        // Головна збірка структури BorderPane
         BorderPane root = new BorderPane();
-        root.setTop(toolBar);
-        root.setCenter(horizontalSplit);
-        root.setBottom(statusBar);
+        root.setTop(searchGrid);
+        root.setCenter(bookTable);
+        root.setLeft(leftPanel);
+        root.setBottom(bottomActions);
 
-        // --- ЛОГІКА КНОПОК ТА ДІЙ ---
-        importInpxBtn.setOnAction(e -> handleInpxImport(primaryStage));
-        searchField.textProperty().addListener((observable, oldValue, newValue) -> handleLiveSearch(newValue));
-        statsBtn.setOnAction(e -> showStatisticsDialog());
-
-        // Первинне завантаження дерева навігації
-        refreshNavigationTree();
-        loadAllBooks();
-
-        Scene scene = new Scene(root, 1050, 750);
+        Scene scene = new Scene(root, 1200, 800);
         primaryStage.setScene(scene);
         primaryStage.show();
+
+        // Первинне завантаження лічильників та записів
+        refreshMetadataCounters();
+        handleSearch();
     }
 
-    private void loadAllBooks() {
-        statusLabel.setText("Завантаження книг...");
-        List<Book> allBooks = database.searchBooks("");
-        masterBookList.setAll(allBooks);
-        statusLabel.setText("Завантажено книг: " + masterBookList.size());
+    private void handleSearch() {
+        SearchCriteria criteria = new SearchCriteria(
+                titleField.getText(),
+                authorField.getText(),
+                genreField.getText(),
+                seriesField.getText(),
+                "", null, null, null, null, null, null, "", "", "", "", ""
+        );
+        List<Book> books = database.findBooks(criteria);
+        bookTable.setItems(FXCollections.observableArrayList(books));
     }
 
-    private void handleLiveSearch(String keyword) {
-        if (keyword == null || keyword.isBlank()) {
-            loadAllBooks();
-        } else {
-            List<Book> found = database.searchBooks(keyword);
-            masterBookList.setAll(found);
-            statusLabel.setText("Знайдено книг за запитом: " + masterBookList.size());
+    private void refreshMetadataCounters() {
+        totalBooksLabel.setText("Книг у базі: " + database.getBooksCount());
+        totalAuthorsLabel.setText("Авторів у базі: " + database.getAuthorsCount());
+        totalGenresLabel.setText("Жанрів у базі: " + database.getGenresCount());
+    }
+
+    private void handleFolderImport(Stage stage) {
+        DirectoryChooser chooser = new DirectoryChooser();
+        chooser.setTitle("Виберіть папку для пакетного імпорту книг");
+        File selectedFolder = chooser.showDialog(stage);
+        if (selectedFolder != null) {
+            logArea.clear();
+            logArea.appendText("Запуск сканування папки... Будь ласка, зачекайте.\n");
+
+            new Thread(() -> {
+                libraryService.importFolder(selectedFolder.toPath(), log -> Platform.runLater(() -> logArea.appendText(log + "\n")), true, true);
+                Platform.runLater(() -> {
+                    refreshMetadataCounters();
+                    handleSearch();
+                });
+            }).start();
         }
-    }
-
-    private void handleTreeNavigation(String category, String value) {
-        statusLabel.setText("Фільтрація: " + category + " -> " + value);
-        // Динамічна побудова критеріїв залежно від вибору в дереві
-        org.myhomelib.model.SearchCriteria criteria = switch (category) {
-            case "Автори" -> new org.myhomelib.model.SearchCriteria(null, value, null, null, null, null, null, null, null, null, null, null, null, null, null, null);
-            case "Серії" -> new org.myhomelib.model.SearchCriteria(null, null, null, value, null, null, null, null, null, null, null, null, null, null, null, null);
-            case "Жанри" -> new org.myhomelib.model.SearchCriteria(null, null, value, null, null, null, null, null, null, null, null, null, null, null, null, null);
-            default -> org.myhomelib.model.SearchCriteria.empty();
-        };
-        List<Book> filtered = database.searchAdvanced(criteria);
-        masterBookList.setAll(filtered);
     }
 
     private void handleInpxImport(Stage stage) {
-        FileChooser fileChooser = new FileChooser();
-        fileChooser.setTitle("Оберіть файл колекції INPX");
-        fileChooser.getExtensionFilters().add(new FileChooser.ExtensionFilter("Файли індексів (*.inpx)", "*.inpx"));
-        File selectedFile = fileChooser.showOpenDialog(stage);
-
+        FileChooser chooser = new FileChooser();
+        chooser.setTitle("Виберіть файл колекції індексів INPX");
+        chooser.getExtensionFilters().add(new FileChooser.ExtensionFilter("Файли метаданих INPX (*.inpx)", "*.inpx"));
+        File selectedFile = chooser.showOpenDialog(stage);
         if (selectedFile != null) {
-            statusLabel.setText("Запущено фоновий імпорт з файлу: " + selectedFile.getName());
-            Thread importThread = new Thread(() -> {
-                try {
-                    libraryService.importInpx(selectedFile.toPath(), status -> Platform.runLater(() -> statusLabel.setText(status)));
-                    Platform.runLater(() -> {
-                        statusLabel.setText("Імпорт успішно завершено!");
-                        refreshNavigationTree();
-                        loadAllBooks();
-                    });
-                } catch (Exception ex) {
-                    Platform.runLater(() -> statusLabel.setText("Помилка імпорту: " + ex.getMessage()));
-                }
-            });
-            importThread.setDaemon(true);
-            importThread.start();
+            logArea.clear();
+            logArea.appendText("Запуск декомпресії та транзакційного парсингу індексів INPX...\n");
+
+            new Thread(() -> {
+                libraryService.importInpx(selectedFile.toPath(), log -> Platform.runLater(() -> logArea.appendText(log + "\n")));
+                Platform.runLater(() -> {
+                    refreshMetadataCounters();
+                    handleSearch();
+                });
+            }).start();
         }
     }
 
-    private void refreshNavigationTree() {
-        TreeItem<String> root = navigationTree.getRoot();
-
-        // Оновлення авторів
-        TreeItem<String> authorsNode = root.getChildren().get(0);
-        authorsNode.getChildren().clear();
-        for (String author : database.listAuthors()) {
-            authorsNode.getChildren().add(new TreeItem<>(author));
-        }
-
-        // Оновлення серій
-        TreeItem<String> seriesNode = root.getChildren().get(1);
-        seriesNode.getChildren().clear();
-        for (String series : database.listSeries()) {
-            seriesNode.getChildren().add(new TreeItem<>(series));
-        }
-
-        // Оновлення жанрів
-        TreeItem<String> genresNode = root.getChildren().get(2);
-        genresNode.getChildren().clear();
-        for (String genre : database.listGenres()) {
-            genresNode.getChildren().add(new TreeItem<>(genre));
-        }
+    private void openBookInReader(Book book) {
+        ReaderStage readerStage = new ReaderStage(book, libraryService);
+        readerStage.show();
     }
 
-    private void updateDetailsPanel(Book book) {
-        titleDetailsLabel.setText(book.title() + " (" + book.authorsText() + ")");
-        if (book.annotation() != null && !book.annotation().isBlank()) {
-            annotationDetailsArea.setText(book.annotation());
-        } else {
-            annotationDetailsArea.setText("Анотація відсутня для цієї книги.");
-        }
-    }
-
-    private void showStatisticsDialog() {
-        Alert alert = new Alert(Alert.AlertType.INFORMATION);
-        alert.setTitle("Статистика колекції");
-        alert.setHeaderText("Поточні показники бази даних MyHomeLib");
-
-        StringBuilder sb = new StringBuilder();
-        database.statistics().forEach((k, v) -> sb.append(k).append(": ").append(v).append("\n"));
-
-        alert.setContentText(sb.toString());
+    private void showWarning(String title, String message) {
+        Alert alert = new Alert(Alert.AlertType.WARNING);
+        alert.setTitle(title);
+        alert.setHeaderText(null);
+        alert.setContentText(message);
         alert.showAndWait();
     }
 
-    @Override
-    public void stop() {
-        if (database != null) {
-            database.close();
-        }
+    public static void main(String[] args) {
+        launch(args);
     }
 }

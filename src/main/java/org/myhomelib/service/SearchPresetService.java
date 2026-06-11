@@ -1,60 +1,31 @@
 package org.myhomelib.service;
 
-import org.myhomelib.db.Database;
+import org.myhomelib.db.BookCollection;
 import org.myhomelib.model.SearchCriteria;
 import org.myhomelib.model.SearchPreset;
 
 import java.util.List;
 
 public final class SearchPresetService {
+    private final BookCollection database;
 
-    private final Database database;
-
-    public SearchPresetService(Database database) {
+    public SearchPresetService(BookCollection database) {
         this.database = database;
     }
 
-    public void savePreset(String name, SearchCriteria criteria) {
-
-        if (name == null || name.isBlank()) {
-            throw new IllegalArgumentException("Preset name is empty");
-        }
-
-        database.saveSearchPreset(
-                name.trim(),
-                criteria
-        );
-    }
-
-    public List<SearchPreset> presets() {
+    public List<SearchPreset> getAllPresets() {
+        // Тепер типи повністю збігаються з інтерфейсом та реалізацією в Database
         return database.loadSearchPresets();
     }
 
-    public void deletePreset(long presetId) {
-        database.deleteSearchPreset(presetId);
-    }
-
-    public SearchPreset findById(long presetId) {
-
-        return presets()
-                .stream()
-                .filter(p -> p.id() == presetId)
-                .findFirst()
-                .orElse(null);
-    }
-
-    public void renamePreset(
-            long presetId,
-            String newName
-    ) {
-
-        if (newName == null || newName.isBlank()) {
-            return;
+    public void createPreset(String name, SearchCriteria criteria) {
+        if (name == null || name.strip().isEmpty()) {
+            throw new IllegalArgumentException("Назва пресета не може бути порожньою");
         }
+        database.saveSearchPreset(name, criteria);
+    }
 
-        database.renameSearchPreset(
-                presetId,
-                newName.trim()
-        );
+    public void removePreset(long id) {
+        database.deleteSearchPreset(id);
     }
 }
