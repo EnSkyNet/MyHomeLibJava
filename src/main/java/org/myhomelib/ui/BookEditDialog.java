@@ -1,179 +1,111 @@
 package org.myhomelib.ui;
 
-import org.myhomelib.model.Author;
 import org.myhomelib.model.Book;
 import org.myhomelib.model.BookEdit;
+import javax.swing.*;
+import java.awt.*;
 
-import javax.swing.BorderFactory;
-import javax.swing.JButton;
-import javax.swing.JDialog;
-import javax.swing.JLabel;
-import javax.swing.JOptionPane;
-import javax.swing.JPanel;
-import javax.swing.JScrollPane;
-import javax.swing.JSpinner;
-import javax.swing.JTextArea;
-import javax.swing.JTextField;
-import javax.swing.SpinnerNumberModel;
-import java.awt.BorderLayout;
-import java.awt.Dimension;
-import java.awt.Frame;
-import java.awt.GridBagConstraints;
-import java.awt.GridBagLayout;
-import java.awt.Insets;
-import java.util.Arrays;
-import java.util.List;
-
-final class BookEditDialog extends JDialog {
-    private final JTextField titleField = new JTextField();
-    private final JTextField authorsField = new JTextField();
-    private final JTextField genresField = new JTextField();
-    private final JTextField seriesField = new JTextField();
-    private final JTextField sequenceField = new JTextField();
-    private final JTextField languageField = new JTextField();
-    private final JTextField keywordsField = new JTextField();
-    private final JSpinner rateSpinner = new JSpinner(new SpinnerNumberModel(0, 0, 5, 1));
-    private final JSpinner progressSpinner = new JSpinner(new SpinnerNumberModel(0, 0, 100, 1));
-    private final JTextArea annotationArea = new JTextArea();
+public final class BookEditDialog extends JDialog {
+    private final Book book;
     private BookEdit result;
 
-    BookEditDialog(Frame owner, Book book) {
-        super(owner, "Edit book", true);
-        setMinimumSize(new Dimension(620, 560));
-        setLocationRelativeTo(owner);
-        build(book);
+    private JTextField titleField;
+    private JTextField sequenceNumField;
+    private JTextField langField;
+    private JTextField keywordsField;
+    private JTextArea annotationArea;
+    private JSlider rateSlider;
+    private JSlider progressSlider;
+
+    public BookEditDialog(Frame owner, Book book) {
+        super(owner, "Редагування картки книги", true);
+        this.book = book;
+        initializeUI();
     }
 
-    BookEdit result() {
-        return result;
-    }
+    private void initializeUI() {
+        setLayout(new BorderLayout(10, 10));
+        setSize(500, 600);
+        setLocationRelativeTo(getOwner());
 
-    private void build(Book book) {
-        titleField.setText(book.title());
-        authorsField.setText(book.authorsText());
-        genresField.setText(book.genresText());
-        seriesField.setText(book.series() == null ? "" : book.series());
-        sequenceField.setText(book.sequenceNumber() == null ? "" : book.sequenceNumber().toString());
-        languageField.setText(book.language() == null ? "" : book.language());
-        keywordsField.setText(book.keywords() == null ? "" : book.keywords());
-        rateSpinner.setValue(book.rate());
-        progressSpinner.setValue(book.progress());
-        annotationArea.setText(book.annotation() == null ? "" : book.annotation());
+        JPanel formPanel = new JPanel(new GridLayout(8, 2, 5, 5));
+        formPanel.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
+
+        formPanel.add(new JLabel("Назва книги:"));
+        titleField = new JTextField(book.title());
+        formPanel.add(titleField);
+
+        formPanel.add(new JLabel("Автори (тільки перегляд):"));
+        // Використовуємо наш виправлений сумісний метод
+        formPanel.add(new JLabel(book.authorsText()));
+
+        formPanel.add(new JLabel("Жанри (тільки перегляд):"));
+        formPanel.add(new JLabel(book.genresText()));
+
+        formPanel.add(new JLabel("Номер у серії:"));
+        sequenceNumField = new JTextField(book.sequenceNumber() != null ? book.sequenceNumber().toString() : "0");
+        formPanel.add(sequenceNumField);
+
+        formPanel.add(new JLabel("Мова:"));
+        langField = new JTextField(book.language());
+        formPanel.add(langField);
+
+        formPanel.add(new JLabel("Ключові слова:"));
+        keywordsField = new JTextField(book.keywords());
+        formPanel.add(keywordsField);
+
+        formPanel.add(new JLabel("Оцінка книги (0-5):"));
+        rateSlider = new JSlider(0, 5, book.rate());
+        rateSlider.setMajorTickSpacing(1);
+        rateSlider.setPaintTicks(true);
+        rateSlider.setPaintLabels(true);
+        formPanel.add(rateSlider);
+
+        formPanel.add(new JLabel("Прогрес читання (%):"));
+        progressSlider = new JSlider(0, 100, book.progress());
+        progressSlider.setMajorTickSpacing(25);
+        progressSlider.setPaintTicks(true);
+        progressSlider.setPaintLabels(true);
+        formPanel.add(progressSlider);
+
+        annotationArea = new JTextArea(book.annotation());
         annotationArea.setLineWrap(true);
         annotationArea.setWrapStyleWord(true);
+        JScrollPane annotationScroll = new JScrollPane(annotationArea);
+        annotationScroll.setBorder(BorderFactory.createTitledBorder("Анотація"));
 
-        JPanel form = new JPanel(new GridBagLayout());
-        form.setBorder(BorderFactory.createEmptyBorder(12, 12, 12, 12));
-        addRow(form, 0, "Title", titleField);
-        addRow(form, 1, "Authors", authorsField);
-        addRow(form, 2, "Genres", genresField);
-        addRow(form, 3, "Series", seriesField);
-        addRow(form, 4, "Number", sequenceField);
-        addRow(form, 5, "Language", languageField);
-        addRow(form, 6, "Keywords", keywordsField);
-        addRow(form, 7, "Rate", rateSpinner);
-        addRow(form, 8, "Progress", progressSpinner);
+        JPanel buttonsPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT));
+        JButton saveButton = new JButton("Зберегти");
+        JButton cancelButton = new JButton("Скасувати");
+        buttonsPanel.add(saveButton);
+        buttonsPanel.add(cancelButton);
 
-        GridBagConstraints label = constraints(0, 9);
-        label.anchor = GridBagConstraints.NORTHWEST;
-        form.add(new JLabel("Annotation"), label);
-        GridBagConstraints value = constraints(1, 9);
-        value.weighty = 1;
-        value.fill = GridBagConstraints.BOTH;
-        form.add(new JScrollPane(annotationArea), value);
+        add(formPanel, BorderLayout.NORTH);
+        add(annotationScroll, BorderLayout.CENTER);
+        add(buttonsPanel, BorderLayout.SOUTH);
 
-        JPanel buttons = new JPanel();
-        JButton save = new JButton("Save");
-        JButton cancel = new JButton("Cancel");
-        save.addActionListener(event -> save());
-        cancel.addActionListener(event -> dispose());
-        buttons.add(save);
-        buttons.add(cancel);
-
-        setLayout(new BorderLayout());
-        add(form, BorderLayout.CENTER);
-        add(buttons, BorderLayout.SOUTH);
-    }
-
-    private void addRow(JPanel form, int row, String title, java.awt.Component field) {
-        GridBagConstraints label = constraints(0, row);
-        label.weightx = 0;
-        label.fill = GridBagConstraints.NONE;
-        label.anchor = GridBagConstraints.WEST;
-        form.add(new JLabel(title), label);
-
-        GridBagConstraints value = constraints(1, row);
-        value.weightx = 1;
-        value.fill = GridBagConstraints.HORIZONTAL;
-        form.add(field, value);
-    }
-
-    private GridBagConstraints constraints(int x, int y) {
-        GridBagConstraints c = new GridBagConstraints();
-        c.gridx = x;
-        c.gridy = y;
-        c.insets = new Insets(4, 4, 4, 4);
-        c.weightx = x == 1 ? 1 : 0;
-        return c;
-    }
-
-    private void save() {
-        Integer sequence = null;
-        if (!sequenceField.getText().isBlank()) {
+        cancelButton.addActionListener(e -> dispose());
+        saveButton.addActionListener(e -> {
+            Integer seqNum = 0;
             try {
-                sequence = Integer.parseInt(sequenceField.getText().trim());
-            } catch (NumberFormatException e) {
-                JOptionPane.showMessageDialog(this, "Number must be an integer.", "Invalid value", JOptionPane.ERROR_MESSAGE);
-                return;
-            }
-        }
-        result = new BookEdit(
-                titleField.getText().trim(),
-                parseAuthors(authorsField.getText()),
-                splitList(genresField.getText()),
-                seriesField.getText().trim(),
-                sequence,
-                languageField.getText().trim(),
-                keywordsField.getText().trim(),
-                annotationArea.getText().trim(),
-                (Integer) rateSpinner.getValue(),
-                (Integer) progressSpinner.getValue()
-        );
-        dispose();
+                seqNum = Integer.parseInt(sequenceNumField.getText().trim());
+            } catch (NumberFormatException ignored) {}
+
+            // Виклик виправленого конструктора рекорду BookEdit (всього 7 параметрів)
+            result = new BookEdit(
+                    titleField.getText().trim(),
+                    seqNum,
+                    langField.getText().trim(),
+                    keywordsField.getText().trim(),
+                    annotationArea.getText().trim(),
+                    rateSlider.getValue(),
+                    progressSlider.getValue()
+            );
+            dispose();
+        });
     }
 
-    private static List<Author> parseAuthors(String text) {
-        List<Author> authors = splitList(text).stream()
-                .map(BookEditDialog::parseAuthor)
-                .toList();
-        if (authors.isEmpty()) {
-            return List.of(new Author(0, "", "", "Unknown"));
-        }
-        return authors;
-    }
-
-    private static Author parseAuthor(String text) {
-        String[] parts = text.trim().split("\\s+");
-        if (parts.length == 0) {
-            return new Author(0, "", "", "Unknown");
-        }
-        if (parts.length == 1) {
-            return new Author(0, "", "", parts[0]);
-        }
-        if (parts.length == 2) {
-            return new Author(0, parts[1], "", parts[0]);
-        }
-        String middle = String.join(" ", Arrays.copyOfRange(parts, 2, parts.length));
-        return new Author(0, parts[1], middle, parts[0]);
-    }
-
-    private static List<String> splitList(String text) {
-        if (text == null || text.isBlank()) {
-            return List.of();
-        }
-        return Arrays.stream(text.split(","))
-                .map(String::trim)
-                .filter(value -> !value.isBlank())
-                .toList();
+    public BookEdit getResult() {
+        return result;
     }
 }
