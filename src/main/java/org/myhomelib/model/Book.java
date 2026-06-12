@@ -50,7 +50,7 @@ public final class Book {
     public String title() { return title; }
     public List<Author> authors() { return new ArrayList<>(authors); }
     public List<String> genres() { return new ArrayList<>(genres); }
-    public String seriesName() { return series; }
+    public String series() { return series; }
     public Integer sequenceNumber() { return sequenceNumber; }
     public String language() { return language; }
     public String fileName() { return fileName; }
