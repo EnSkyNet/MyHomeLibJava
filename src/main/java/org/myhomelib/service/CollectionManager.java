@@ -1,16 +1,19 @@
 package org.myhomelib.service;
 
-import org.myhomelib.db.Database;
+import org.myhomelib.db.DatabaseManager;
 import org.myhomelib.db.SystemDatabase;
+import org.myhomelib.db.repository.SearchRepository;
 import org.myhomelib.model.CollectionInfo;
 import org.myhomelib.model.CollectionType;
+import org.myhomelib.model.SearchCriteria;
 
 import java.nio.file.Path;
 import java.util.List;
 
 public final class CollectionManager implements AutoCloseable {
     private final SystemDatabase systemDatabase;
-    private final Database collectionDatabase;
+    // Прибрано модифікатор final, щоб мати можливість безпечно перемикати бази даних при зміні колекції
+    private DatabaseManager collectionDatabase;
     private CollectionInfo activeCollection;
 
     public CollectionManager(Path systemDatabasePath, Path defaultCollectionPath) {
@@ -22,7 +25,10 @@ public final class CollectionManager implements AutoCloseable {
                 CollectionType.PRIVATE_FB
         );
         this.activeCollection = systemDatabase.collection(collectionId);
-        this.collectionDatabase = new Database(activeCollection.databasePath());
+
+        // Ініціалізація бази даних через конструктор, як того вимагає нова архітектура
+        this.collectionDatabase = new DatabaseManager(activeCollection.databasePath());
+        this.collectionDatabase.open();
 
         // !!! ВИДАЛІТЬ АБО ЗАКОМЕНТУЙТЕ ЦЕЙ РЯДОК !!!
         // syncActiveCollectionBooks();
@@ -37,7 +43,7 @@ public final class CollectionManager implements AutoCloseable {
         return systemDatabase;
     }
 
-    public Database collectionDatabase() {
+    public DatabaseManager collectionDatabase() {
         return collectionDatabase;
     }
 
@@ -58,8 +64,9 @@ public final class CollectionManager implements AutoCloseable {
         java.util.concurrent.CompletableFuture.runAsync(() -> {
             System.out.println("[Синхронізація] Початок обробки книг у фоні...");
 
-            // База даних буде зчитувати книги у фоні, UI залишається повністю робочим
-            List<org.myhomelib.model.Book> allBooks = collectionDatabase.searchBooks("");
+            SearchRepository searchRepository = new SearchRepository(collectionDatabase);
+            List<org.myhomelib.model.Book> allBooks = searchRepository.searchBooks(SearchCriteria.empty());
+
             systemDatabase.replaceBooks(activeCollection.id(), allBooks);
 
             System.out.println("[Синхронізація] Успішно синхронізовано " + allBooks.size() + " книг.");
@@ -70,6 +77,9 @@ public final class CollectionManager implements AutoCloseable {
         });
     }
 
+    /**
+     * Відкриває або реєструє нову колекцію, коректно перевизначаючи менеджер підключення.
+     */
     public void openOrRegisterCollection(Path databasePath) {
         long id = systemDatabase.registerCollection(
                 databasePath,
@@ -81,7 +91,16 @@ public final class CollectionManager implements AutoCloseable {
         if (collection == null) {
             throw new IllegalStateException("Collection was not registered: " + databasePath);
         }
-        collectionDatabase.open(collection.databasePath());
+
+        // ВИПРАВЛЕНО: Закриваємо попереднє з'єднання перед відкриттям нового файлу БД
+        if (collectionDatabase != null) {
+            collectionDatabase.close();
+        }
+
+        // Створюємо новий екземпляр DatabaseManager для нового шляху, викликаючи метод open() без аргументів
+        collectionDatabase = new DatabaseManager(collection.databasePath());
+        collectionDatabase.open();
+
         activeCollection = collection;
         //syncActiveCollectionBooks();
     }
@@ -112,7 +131,11 @@ public final class CollectionManager implements AutoCloseable {
 
     @Override
     public void close() {
-        collectionDatabase.close();
-        systemDatabase.close();
+        if (collectionDatabase != null) {
+            collectionDatabase.close();
+        }
+        if (systemDatabase != null) {
+            systemDatabase.close();
+        }
     }
 }

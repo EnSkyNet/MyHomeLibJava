@@ -31,6 +31,20 @@ public record SearchCriteria(
         group = group != null ? group.trim() : "";
     }
 
+    /**
+     * Перевантажений конструктор на 5 аргументів для швидкої ініціалізації з базової панелі пошуку UI
+     */
+    public SearchCriteria(String title, String author, String genre, String series, String language) {
+        this(title, author, genre, series, language, null, null, null, null, null, null, "", "", "", "", "");
+    }
+
+    /**
+     * Перевантажений конструктор на 4 аргументи (якщо мова не передається окремим параметром)
+     */
+    public SearchCriteria(String title, String author, String genre, String series) {
+        this(title, author, genre, series, "", null, null, null, null, null, null, "", "", "", "", "");
+    }
+
     // Сумісність із JavaFX / Swing фільтрами за замовчуванням
     public static SearchCriteria empty() {
         return new SearchCriteria("", "", "", "", "", null, null, null, null, null, null, "", "", "", "", "");
