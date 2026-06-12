@@ -1,0 +1,121 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<?import javafx.geometry.Insets?>
+<?import javafx.scene.control.*?>
+<?import javafx.scene.layout.*?>
+
+<BorderPane prefHeight="700.0" prefWidth="1100.0" xmlns="http://javafx.com/javafx/17" xmlns:fx="http://javafx.com/fxml/1" fx:controller="org.myhomelib.ui.controller.MainController">
+    <top>
+        <ToolBar prefHeight="40.0" prefWidth="200.0" BorderPane.alignment="CENTER">
+            <items>
+                <Button text="Колекція" />
+                <Button fx:id="btnInpx" onAction="#handleImportInpx" text="Додати .INPX" />
+                <Button fx:id="btnZip" onAction="#handleImportZipFb2" text="Додати ZIP/FB2" />
+                <Button onAction="#handleImportGenres" text="Імпорт жанрів (.glst)" />
+                <Separator orientation="VERTICAL" />
+                <Button onAction="#handleShowStatistics" text="Статистика" />
+                <Button onAction="#handleCleanDatabase" text="Очистити БД" />
+                <Separator orientation="VERTICAL" />
+                <Button text="CYR" />
+                <Button text="LAT" />
+                <Separator orientation="VERTICAL" />
+                <Button onAction="#handleOpenAdvancedSearch" text="Розширений пошук" />
+            </items>
+        </ToolBar>
+    </top>
+    <center>
+        <SplitPane dividerPositions="0.25" prefHeight="160.0" prefWidth="200.0" BorderPane.alignment="CENTER">
+            <items>
+                <TabPane side="TOP" tabClosingPolicy="UNAVAILABLE">
+                    <tabs>
+                        <Tab text="Автори">
+                            <content>
+                                <ListView fx:id="authorListView" />
+                            </content>
+                        </Tab>
+                        <Tab text="Серії">
+                            <content>
+                                <ListView fx:id="seriesListView" />
+                            </content>
+                        </Tab>
+                        <Tab text="Жанри">
+                            <content>
+                                <TreeView fx:id="genreTreeView" />
+                            </content>
+                        </Tab>
+                        <Tab text="Пошук">
+                            <content>
+                                <GridPane hgap="5.0" vgap="8.0">
+                                    <padding>
+                                        <Insets bottom="10.0" left="10.0" right="10.0" top="10.0" />
+                                    </padding>
+                                    <columnConstraints>
+                                        <ColumnConstraints hgrow="SOMETIMES" maxWidth="80.0" minWidth="50.0" prefWidth="60.0" />
+                                        <ColumnConstraints hgrow="ALWAYS" minWidth="100.0" />
+                                    </columnConstraints>
+                                    <rowConstraints>
+                                        <RowConstraints minHeight="10.0" prefHeight="30.0" vgrow="SOMETIMES" />
+                                        <RowConstraints minHeight="10.0" prefHeight="30.0" vgrow="SOMETIMES" />
+                                        <RowConstraints minHeight="10.0" prefHeight="30.0" vgrow="SOMETIMES" />
+                                        <RowConstraints minHeight="10.0" prefHeight="30.0" vgrow="SOMETIMES" />
+                                        <RowConstraints minHeight="10.0" prefHeight="40.0" vgrow="SOMETIMES" />
+                                    </rowConstraints>
+                                    <children>
+                                        <Label text="Назва:" />
+                                        <TextField fx:id="titleField" GridPane.columnIndex="1" />
+                                        <Label text="Автор:" GridPane.rowIndex="1" />
+                                        <TextField fx:id="searchAuthorField" GridPane.columnIndex="1" GridPane.rowIndex="1" />
+                                        <Label text="Серія:" GridPane.rowIndex="2" />
+                                        <TextField fx:id="searchSeriesField" GridPane.columnIndex="1" GridPane.rowIndex="2" />
+                                        <Label text="Мова:" GridPane.rowIndex="3" />
+                                        <ComboBox fx:id="langFilterComboBox" prefWidth="150.0" GridPane.columnIndex="1" GridPane.rowIndex="3" />
+                                        <Button maxWidth="1.7976931348623157E308" onAction="#handleSearch" text="Шукати" GridPane.columnSpan="2" GridPane.rowIndex="4" />
+                                    </children>
+                                </GridPane>
+                            </content>
+                        </Tab>
+                    </tabs>
+                </TabPane>
+                <SplitPane orientation="VERTICAL" dividerPositions="0.7">
+                    <items>
+                        <TableView fx:id="bookTable" prefHeight="200.0" prefWidth="200.0">
+                            <columns>
+                                <TableColumn fx:id="titleCol" prefWidth="250.0" text="Назва книги" />
+                                <TableColumn fx:id="authorCol" prefWidth="180.0" text="Автор" />
+                                <TableColumn fx:id="seriesCol" prefWidth="140.0" text="Серія" />
+                                <TableColumn fx:id="langCol" prefWidth="60.0" text="Мова" />
+                            </columns>
+                        </TableView>
+                        <HBox spacing="15.0" style="-fx-background-color: #f9f9f9;">
+                            <padding>
+                                <Insets bottom="10.0" left="10.0" right="10.0" top="10.0" />
+                            </padding>
+                            <children>
+                                <StackPane prefHeight="150.0" prefWidth="110.0" style="-fx-border-color: #cccccc; -fx-background-color: #eeeeee;" />
+                                <VBox spacing="5.0" HBox.hgrow="ALWAYS">
+                                    <children>
+                                        <Label fx:id="bookDetailTitleLabel" style="-fx-font-weight: bold; -fx-font-size: 14px;" text="Назва книги: Не вибрано" />
+                                        <Label fx:id="bookDetailAuthorLabel" text="Автор: -" />
+                                        <TextArea fx:id="bookAnnotationTextArea" editable="false" wrapText="true" VBox.vgrow="ALWAYS" />
+                                    </children>
+                                </VBox>
+                            </children>
+                        </HBox>
+                    </items>
+                </SplitPane>
+            </items>
+        </SplitPane>
+    </center>
+    <bottom>
+        <HBox spacing="10.0" style="-fx-background-color: #f0f0f0; -fx-border-color: #cccccc; -fx-border-width: 1 0 0 0;" BorderPane.alignment="CENTER">
+            <padding>
+                <Insets bottom="4.0" left="10.0" right="10.0" top="4.0" />
+            </padding>
+            <children>
+                <Label fx:id="statusLeftLabel" text="Готово" />
+                <Pane HBox.hgrow="ALWAYS" />
+                <Label fx:id="statusRightLabel" text="Всього книг в базі: 0" />
+            </children>
+        </HBox>
+    </bottom>
+</BorderPane>
