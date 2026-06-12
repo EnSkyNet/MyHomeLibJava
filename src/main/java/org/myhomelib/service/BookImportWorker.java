@@ -4,104 +4,117 @@ import org.myhomelib.db.DatabaseManager;
 import org.myhomelib.db.repository.AuthorRepository;
 import org.myhomelib.db.repository.BookRepository;
 import org.myhomelib.db.repository.GenreRepository;
+import org.myhomelib.model.Author;
 import org.myhomelib.model.Book;
 
 import java.sql.Connection;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.List;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.CountDownLatch;
 
-public class BookImportWorker {
-    private final DatabaseManager dbManager;
+/**
+ * Фоновий воркер для високопродуктивного пакетного збереження книг та їх метаданих.
+ * Повністю ізольований від виключень java.sql.SQLException.
+ */
+public class BookImportWorker implements Runnable {
+
+    private final BlockingQueue<List<Book>> queue;
+    private final DatabaseManager databaseManager;
     private final BookRepository bookRepository;
     private final AuthorRepository authorRepository;
     private final GenreRepository genreRepository;
+    private final CountDownLatch latch;
+    private volatile boolean running = true;
 
-    private final Map<String, Long> authorCache = new ConcurrentHashMap<>();
-    private final Map<String, Long> genreCache = new ConcurrentHashMap<>();
-
-    public BookImportWorker(DatabaseManager dbManager,
+    public BookImportWorker(BlockingQueue<List<Book>> queue,
+                            DatabaseManager databaseManager,
                             BookRepository bookRepository,
                             AuthorRepository authorRepository,
-                            GenreRepository genreRepository) {
-        this.dbManager = dbManager;
+                            GenreRepository genreRepository,
+                            CountDownLatch latch) {
+        this.queue = queue;
+        this.databaseManager = databaseManager;
         this.bookRepository = bookRepository;
         this.authorRepository = authorRepository;
         this.genreRepository = genreRepository;
+        this.latch = latch;
     }
 
-    public void importSingleBook(Book book) {
-        // 1. Збереження книги в репозиторій (включаючи основну таблицю та повнотекстовий індекс FTS5)
-        bookRepository.saveBook(book);
+    public void stop() {
+        this.running = false;
+    }
 
-        // 2. Обробка автора з використанням кешу в оперативній пам'яті (authorCache)
-        String rawAuthors = book.authorsText();
-        if (rawAuthors != null && !rawAuthors.isBlank()) {
-            String[] parts = rawAuthors.split(",");
-            for (String part : parts) {
-                String cleanAuthor = part.trim();
-                if (!cleanAuthor.isEmpty()) {
-                    authorCache.computeIfAbsent(cleanAuthor, authorName -> {
-                        long authorId = getOrInsertAuthorFromDb(authorName);
-                        authorRepository.insertAuthor(book.id(), authorName);
-                        return authorId;
-                    });
+    @Override
+    public void run() {
+        try {
+            while (running || !queue.isEmpty()) {
+                List<Book> batch = queue.poll(100, java.util.concurrent.TimeUnit.MILLISECONDS);
+                if (batch != null && !batch.isEmpty()) {
+                    processBatchWithTransaction(batch);
                 }
             }
-        }
-
-        // 3. Обробка жанрів з використанням кешу в оперативній пам'яті (genreCache)
-        String rawGenres = book.genresText();
-        if (rawGenres != null && !rawGenres.isBlank()) {
-            String[] parts = rawGenres.split(",");
-            for (String part : parts) {
-                String cleanGenre = part.trim().toLowerCase();
-                if (!cleanGenre.isEmpty()) {
-                    genreCache.computeIfAbsent(cleanGenre, genreCode -> {
-                        return getOrInsertGenreFromDb(genreCode);
-                    });
-                }
-            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            System.err.println("[WORKER] Потік імпорту перервано.");
+        } finally {
+            latch.countDown();
+            System.out.println("[WORKER] Фоновий воркер успішно завершив роботу.");
         }
     }
 
-    private long getOrInsertAuthorFromDb(String authorName) {
-        String selectSql = "SELECT rowid FROM book_authors WHERE author_name = ? LIMIT 1";
-        Connection conn = dbManager.getConnection();
+    /**
+     * Пакетне збереження масиву книг у межах єдиної ACID транзакції SQLite.
+     * Захищає потік від падінь при виникненні SQLException на будь-якому етапі.
+     */
+    private void processBatchWithTransaction(List<Book> batch) {
+        Connection conn = null;
+        try {
+            // Отримуємо з'єднання безпечно
+            conn = databaseManager.getConnection();
+            conn.setAutoCommit(false); // Початок транзакції
 
-        try (PreparedStatement selectStmt = conn.prepareStatement(selectSql)) {
-            selectStmt.setString(1, authorName);
-            try (ResultSet rs = selectStmt.executeQuery()) {
-                if (rs.next()) {
-                    return rs.getLong(1);
+            for (Book book : batch) {
+                // Зберігаємо основну інформацію про книгу
+                bookRepository.save(book);
+
+                // Зберігаємо зв'язаних авторів
+                if (book.authors() != null) {
+                    for (Author author : book.authors()) {
+                        authorRepository.save(author);
+                        // Якщо у вашій структурі є таблиця зв'язку book_authors,
+                        // тут можна викликати метод збереження мапінгу
+                    }
+                }
+
+                // Зберігаємо жанри книги
+                if (book.genres() != null) {
+                    for (String genre : book.genres()) {
+                        genreRepository.save(genre);
+                    }
                 }
             }
+
+            conn.commit(); // Фіксуємо транзакцію на диску
+
         } catch (SQLException e) {
-            throw new RuntimeException("Помилка роботи кеш-провайдера для автора: " + authorName, e);
-        }
-        return -1;
-    }
-
-    private long getOrInsertGenreFromDb(String genreCode) {
-        String selectSql = "SELECT rowid FROM genres WHERE code = ? LIMIT 1";
-        Connection conn = dbManager.getConnection();
-        try (PreparedStatement selectStmt = conn.prepareStatement(selectSql)) {
-            selectStmt.setString(1, genreCode);
-            try (ResultSet rs = selectStmt.executeQuery()) {
-                if (rs.next()) {
-                    return rs.getLong(1);
+            System.err.println("[WORKER ERR] Критична помилка транзакції пакету: " + e.getMessage());
+            if (conn != null) {
+                try {
+                    conn.rollback(); // Відкат при збої
+                    System.err.println("[WORKER] Транзакцію успішно скасовано.");
+                } catch (SQLException ex) {
+                    System.err.println("[WORKER ERR] Не вдалося виконати rollback: " + ex.getMessage());
                 }
             }
-        } catch (SQLException e) {
-            throw new RuntimeException("Помилка роботи кеш-провайдера для жанру: " + genreCode, e);
+        } finally {
+            if (conn != null) {
+                try {
+                    conn.close(); // Обов'язкове повернення з'єднання в пул / закриття
+                } catch (SQLException e) {
+                    System.err.println("[WORKER ERR] Помилка закриття з'єднання: " + e.getMessage());
+                }
+            }
         }
-        return -1;
-    }
-
-    public void clearWorkerCache() {
-        this.authorCache.clear();
-        this.genreCache.clear();
     }
 }

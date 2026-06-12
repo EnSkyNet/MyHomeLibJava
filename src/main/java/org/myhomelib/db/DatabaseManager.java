@@ -1,126 +1,194 @@
 package org.myhomelib.db;
 
+import org.myhomelib.model.Book;
+import org.myhomelib.model.Author;
+
+import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.DriverManager;
+import java.sql.PreparedStatement;
 import java.sql.SQLException;
-import java.nio.file.Path;
+import java.sql.Statement;
+import java.util.List;
 
+/**
+ * Enterprise Менеджер бази даних SQLite.
+ * Повністю сумісний з CollectionManager та репозиторіями додатка.
+ */
 public class DatabaseManager {
-    private Connection connection;
-    private final Path dbPath;
 
+    private final String dbUrl;
+    private Connection activeConnection;
+
+    // Конструктор для підтримки Path
     public DatabaseManager(Path dbPath) {
-        this.dbPath = dbPath;
+        this.dbUrl = "jdbc:sqlite:" + dbPath.toAbsolutePath().toString();
+        initializeDatabase();
     }
 
-    public void open() {
-        try {
-            if (connection == null || connection.isClosed()) {
-                String url = "jdbc:sqlite:" + dbPath.toAbsolutePath().toString();
-                this.connection = DriverManager.getConnection(url);
+    // Конструктор для підтримки String
+    public DatabaseManager(String dbPath) {
+        this.dbUrl = "jdbc:sqlite:" + dbPath;
+        initializeDatabase();
+    }
 
-                // Увімкнення системних прагм для максимальної продуктивності SQLite
-                try (var stmt = connection.createStatement()) {
-                    stmt.execute("PRAGMA foreign_keys = ON;");
-                    stmt.execute("PRAGMA journal_mode = WAL;"); // Режим Write-Ahead Logging для паралельного доступу
-                    stmt.execute("PRAGMA synchronous = NORMAL;"); // Оптимізація швидкості запису на диск
+    /**
+     * Ініціалізація структур та швидкісних PRAGMA-налаштувань.
+     */
+    private void initializeDatabase() {
+        try (Connection conn = getConnection();
+             Statement stmt = conn.createStatement()) {
 
-                    // Створення структури таблиць (якщо вони відсутні)
-                    stmt.execute("CREATE TABLE IF NOT EXISTS books (" +
-                            "id INTEGER PRIMARY KEY, " +
-                            "title TEXT, " +
-                            "authors TEXT, " +
-                            "series TEXT, " +
-                            "language TEXT, " +
-                            "genre TEXT, " +
-                            "file_name TEXT, " +
-                            "folder TEXT, " +
-                            "archive_entry TEXT, " +
-                            "file_size INTEGER, " +
-                            "keywords TEXT, " +
-                            "annotation TEXT, " +
-                            "rate INTEGER, " +
-                            "progress INTEGER, " +
-                            "update_date TEXT" +
-                            ");");
+            stmt.execute("PRAGMA journal_mode=WAL;");
+            stmt.execute("PRAGMA synchronous=OFF;");
+            stmt.execute("PRAGMA cache_size=-64000;");
+            stmt.execute("PRAGMA foreign_keys=ON;");
 
-                    stmt.execute("CREATE TABLE IF NOT EXISTS book_authors (" +
-                            "book_id INTEGER, " +
-                            "author_name TEXT, " +
-                            "PRIMARY KEY (book_id, author_name)" +
-                            ");");
+            stmt.execute("""
+                CREATE TABLE IF NOT EXISTS books (
+                    id INTEGER PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    series TEXT,
+                    sequence_number INTEGER,
+                    file_name TEXT,
+                    folder TEXT,
+                    archive_entry TEXT,
+                    language TEXT,
+                    file_size INTEGER,
+                    keywords TEXT,
+                    annotation TEXT,
+                    rate INTEGER,
+                    progress INTEGER,
+                    date_time TEXT
+                );
+            """);
 
-                    stmt.execute("CREATE TABLE IF NOT EXISTS genres (" +
-                            "code TEXT PRIMARY KEY, " +
-                            "name TEXT, " +
-                            "lang TEXT" +
-                            ");");
+            stmt.execute("""
+                CREATE TABLE IF NOT EXISTS authors (
+                    id INTEGER PRIMARY KEY,
+                    full_name TEXT NOT NULL,
+                    field3 TEXT,
+                    field4 TEXT
+                );
+            """);
 
-                    // ==========================================
-                    // АВТОМАТИЧНЕ СТВОРЕННЯ ОПТИМІЗОВАНИХ ІНДЕКСІВ
-                    // ==========================================
-                    stmt.execute("CREATE INDEX IF NOT EXISTS idx_books_title ON books(title);");
-                    stmt.execute("CREATE INDEX IF NOT EXISTS idx_books_series ON books(series);");
-                    stmt.execute("CREATE INDEX IF NOT EXISTS idx_books_language ON books(language);");
-                    stmt.execute("CREATE INDEX IF NOT EXISTS idx_books_genre ON books(genre);");
-                    stmt.execute("CREATE INDEX IF NOT EXISTS idx_book_authors_name ON book_authors(author_name);");
-                    stmt.execute("CREATE INDEX IF NOT EXISTS idx_book_authors_book_id ON book_authors(book_id);");
-                    stmt.execute("CREATE INDEX IF NOT EXISTS idx_genres_code ON genres(code);");
+            stmt.execute("""
+                CREATE TABLE IF NOT EXISTS book_authors (
+                    book_id INTEGER,
+                    author_id INTEGER,
+                    PRIMARY KEY (book_id, author_id),
+                    FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE,
+                    FOREIGN KEY (author_id) REFERENCES authors(id) ON DELETE CASCADE
+                );
+            """);
+
+        } catch (SQLException e) {
+            System.err.println("[DB ERR] Помилка ініціалізації: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Метод open() для сумісності з CollectionManager.
+     */
+    public void open() throws SQLException {
+        if (activeConnection == null || activeConnection.isClosed()) {
+            activeConnection = getConnection();
+            System.out.println("[DB] З'єднання з базою даних успішно відкрито.");
+        }
+    }
+
+    /**
+     * Метод close() для сумісності з CollectionManager.
+     */
+    public void close() throws SQLException {
+        if (activeConnection != null && !activeConnection.isClosed()) {
+            activeConnection.close();
+            System.out.println("[DB] З'єднання з базою даних закрито.");
+        }
+    }
+
+    public Connection getConnection() throws SQLException {
+        return DriverManager.getConnection(dbUrl);
+    }
+
+    /**
+     * Високошвидкісний пакетний імпорт книг та авторів.
+     */
+    public void saveBooksBatch(List<Book> books) {
+        String insertBookSql = """
+            INSERT OR IGNORE INTO books (id, title, series, sequence_number, file_name, folder, archive_entry, language, file_size, keywords, annotation, rate, progress, date_time)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+        """;
+
+        String insertAuthorSql = "INSERT OR IGNORE INTO authors (id, full_name, field3, field4) VALUES (?, ?, ?, ?);";
+        String insertRelationSql = "INSERT OR IGNORE INTO book_authors (book_id, author_id) VALUES (?, ?);";
+
+        try (Connection conn = getConnection()) {
+            conn.setAutoCommit(false);
+
+            try (PreparedStatement bookStmt = conn.prepareStatement(insertBookSql);
+                 PreparedStatement authorStmt = conn.prepareStatement(insertAuthorSql);
+                 PreparedStatement relStmt = conn.prepareStatement(insertRelationSql)) {
+
+                for (Book book : books) {
+                    bookStmt.setLong(1, book.id());
+                    bookStmt.setString(2, book.title());
+                    bookStmt.setString(3, book.series());
+                    bookStmt.setInt(4, book.sequenceNumber() != null ? book.sequenceNumber() : 0);
+                    bookStmt.setString(5, book.fileName());
+                    bookStmt.setString(6, book.folder());
+                    bookStmt.setString(7, book.archiveEntry());
+                    bookStmt.setString(8, book.language());
+                    bookStmt.setLong(9, book.fileSize());
+                    bookStmt.setString(10, book.keywords());
+                    bookStmt.setString(11, book.annotation());
+                    bookStmt.setInt(12, book.rate());
+                    bookStmt.setInt(13, book.progress());
+                    bookStmt.setString(14, java.time.LocalDateTime.now().toString());
+                    bookStmt.addBatch();
+
+                    if (book.authors() != null) {
+                        for (Author author : book.authors()) {
+                            long authId = author.id();
+                            String authName = "";
+                            String f3 = "";
+                            String f4 = "";
+
+                            try {
+                                java.lang.reflect.RecordComponent[] components = Author.class.getRecordComponents();
+                                if (components != null && components.length >= 2) {
+                                    authName = (String) components[1].getAccessor().invoke(author);
+                                    if (components.length > 2) f3 = (String) components[2].getAccessor().invoke(author);
+                                    if (components.length > 3) f4 = (String) components[3].getAccessor().invoke(author);
+                                }
+                            } catch (Exception e) {
+                                authName = author.toString();
+                            }
+
+                            authorStmt.setLong(1, authId);
+                            authorStmt.setString(2, authName != null ? authName : "Невідомий автор");
+                            authorStmt.setString(3, f3 != null ? f3 : "");
+                            authorStmt.setString(4, f4 != null ? f4 : "");
+                            authorStmt.addBatch();
+
+                            relStmt.setLong(1, book.id());
+                            relStmt.setLong(2, author.id());
+                            relStmt.addBatch();
+                        }
+                    }
                 }
+
+                bookStmt.executeBatch();
+                authorStmt.executeBatch();
+                relStmt.executeBatch();
+
+                conn.commit();
+            } catch (SQLException e) {
+                conn.rollback();
+                throw e;
             }
         } catch (SQLException e) {
-            throw new RuntimeException("Не вдалося відкрити підключення або ініціалізувати індекси баз даних", e);
-        }
-    }
-
-    public void close() {
-        try {
-            if (connection != null && !connection.isClosed()) {
-                connection.close();
-            }
-        } catch (SQLException e) {
-            throw new RuntimeException("Помилка під час закриття підключення до бази даних", e);
-        }
-    }
-
-    public Connection getConnection() {
-        try {
-            if (connection == null || connection.isClosed()) {
-                open();
-            }
-        } catch (SQLException e) {
-            throw new RuntimeException("Підключення закрите або не ініціалізоване", e);
-        }
-        return connection;
-    }
-
-    public void beginTransaction() {
-        try {
-            getConnection().setAutoCommit(false);
-        } catch (SQLException e) {
-            throw new RuntimeException("Не вдалося запустити транзакцію", e);
-        }
-    }
-
-    public void commitTransaction() {
-        try {
-            if (!getConnection().getAutoCommit()) {
-                getConnection().commit();
-                getConnection().setAutoCommit(true);
-            }
-        } catch (SQLException e) {
-            throw new RuntimeException("Не вдалося зафіксувати транзакцію (commit)", e);
-        }
-    }
-
-    public void rollbackTransaction() {
-        try {
-            if (!getConnection().getAutoCommit()) {
-                getConnection().rollback();
-                getConnection().setAutoCommit(true);
-            }
-        } catch (SQLException e) {
-            throw new RuntimeException("Не вдалося відкотити транзакцію (rollback)", e);
+            System.err.println("[DB ERR] Помилка пакетного збереження: " + e.getMessage());
         }
     }
 }

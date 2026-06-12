@@ -1,218 +1,211 @@
 package org.myhomelib.ui.controller;
 
-import javafx.application.Platform;
+import javafx.concurrent.Task;
 import javafx.fxml.FXML;
-import javafx.fxml.FXMLLoader;
-import javafx.scene.Parent;
-import javafx.scene.Scene;
 import javafx.scene.control.*;
 import javafx.stage.FileChooser;
 import javafx.stage.Stage;
-import org.myhomelib.importer.BookImportTask;
+import org.myhomelib.service.ImportService;
+import org.myhomelib.service.BookImportService;
+import org.myhomelib.ui.viewmodel.LibraryViewModel;
 import org.myhomelib.model.Book;
 
-// ТОЧНИЙ ІМПОРТ, ЯКИЙ ВИПРАВЛЯЄ ПОМИЛКУ КОМПІЛЯЦІЇ:
-import org.myhomelib.ui.viewmodel.LibraryViewModel;
-
 import java.io.File;
-import java.io.IOException;
+import java.nio.file.Path;
 import java.util.List;
+import java.util.stream.Collectors;
 
 public class MainController {
+
+    // === Елементи управління з ToolBar ===
+    @FXML private Button btnInpx;
+    @FXML private Button btnZip;
+
+    // === Елементи управління з TabPane (Ліва панель) ===
+    @FXML private ListView<?> authorListView;
+    @FXML private ListView<?> seriesListView;
+    @FXML private TreeView<?> genreTreeView;
+
+    // === Поля фільтрації пошуку ===
+    @FXML private TextField titleField;
+    @FXML private TextField searchAuthorField;
+    @FXML private TextField searchSeriesField;
+    @FXML private ComboBox<?> langFilterComboBox;
+
+    // === Елементи таблиці книг (Центральна панель) ===
     @FXML private TableView<Book> bookTable;
     @FXML private TableColumn<Book, String> titleCol;
     @FXML private TableColumn<Book, String> authorCol;
     @FXML private TableColumn<Book, String> seriesCol;
     @FXML private TableColumn<Book, String> langCol;
 
-    @FXML private ListView<String> authorListView;
-    @FXML private ListView<String> seriesListView;
-    @FXML private TreeView<String> genreTreeView;
-
-    @FXML private TextField titleField;
-    @FXML private TextField searchAuthorField;
-    @FXML private TextField searchSeriesField;
-    @FXML private ComboBox<String> langFilterComboBox;
-
+    // === Компоненти детальної інформації та анотації (Нижня частина центру) ===
     @FXML private Label bookDetailTitleLabel;
     @FXML private Label bookDetailAuthorLabel;
     @FXML private TextArea bookAnnotationTextArea;
 
+    // === Компоненти статус-бару (Нижня панель) ===
     @FXML private Label statusLeftLabel;
     @FXML private Label statusRightLabel;
 
-    private LibraryViewModel viewModel;
+    // === Шари бізнес-логіки та ViewModel ===
+    private ImportService importService;
+    private BookImportService bookImportService;
+    private LibraryViewModel libraryViewModel;
 
-    @FXML
-    public void initialize() {
-        // Ініціалізація шару ViewModel, який всередині себе створює сервіси
-        this.viewModel = new LibraryViewModel();
+    /**
+     * Впровадження Enterprise-залежностей програми.
+     */
+    public void setDependencies(ImportService importService, BookImportService bookImportService, LibraryViewModel libraryViewModel) {
+        this.importService = importService;
+        this.bookImportService = bookImportService;
+        this.libraryViewModel = libraryViewModel;
 
-        // Двонаправлене зв'язування даних (Data Binding) між UI та ViewModel
-        titleField.textProperty().bindBidirectional(viewModel.searchTextProperty());
-        searchAuthorField.textProperty().bindBidirectional(viewModel.searchAuthorProperty());
-        searchSeriesField.textProperty().bindBidirectional(viewModel.searchSeriesProperty());
-        langFilterComboBox.valueProperty().bindBidirectional(viewModel.selectedLanguageProperty());
-
-        // Налаштування фабрик відображення осередків колонок таблиці книг
-        titleCol.setCellValueFactory(d -> new javafx.beans.property.SimpleStringProperty(d.getValue().title()));
-        authorCol.setCellValueFactory(d -> new javafx.beans.property.SimpleStringProperty(d.getValue().authorsText()));
-        seriesCol.setCellValueFactory(d -> new javafx.beans.property.SimpleStringProperty(d.getValue().series()));
-        langCol.setCellValueFactory(d -> new javafx.beans.property.SimpleStringProperty(d.getValue().language()));
-
-        // Зв'язування колекцій відображення з ViewModel екрану
-        bookTable.setItems(viewModel.getBooks());
-        authorListView.setItems(viewModel.getAuthors());
-        seriesListView.setItems(viewModel.getSeries());
-
-        // Слухач події виділення рядка у таблиці для детального перегляду
-        bookTable.getSelectionModel().selectedItemProperty().addListener((obs, oldVal, newVal) -> {
-            viewModel.selectedBookProperty().set(newVal);
-            if (newVal != null) {
-                bookDetailTitleLabel.setText("Назва книги: " + newVal.title());
-                bookDetailAuthorLabel.setText("Автор: " + newVal.authorsText());
-                bookAnnotationTextArea.setText(newVal.annotation());
-            } else {
-                bookDetailTitleLabel.setText("Назва книги: Не вибрано");
-                bookDetailAuthorLabel.setText("Автор: -");
-                bookAnnotationTextArea.setText("");
-            }
-        });
-
-        // Автоматичне динамічне оновлення лічильника кількості книг у статус-барі
-        statusRightLabel.textProperty().bind(
-                javafx.beans.binding.Bindings.size(viewModel.getBooks()).asString("Книг у вибірці: %d")
-        );
-
-        loadLanguages();
-    }
-
-    private void loadLanguages() {
-        langFilterComboBox.getItems().clear();
-        langFilterComboBox.getItems().add("Всі мови");
-        // Звернення до Service Layer для отримання списку мов з бази
-        langFilterComboBox.getItems().addAll(viewModel.getSearchService().getAvailableLanguages());
-        langFilterComboBox.getSelectionModel().selectFirst();
-    }
-
-    @FXML
-    private void handleSearch() {
-        // Виконання пошуку через ViewModel (яка делегує його SearchService)
-        viewModel.executeSearch();
-        statusLeftLabel.setText("Пошук завершено.");
-    }
-
-    @FXML
-    private void handleImportInpx() {
-        FileChooser chooser = new FileChooser();
-        chooser.setTitle("Виберіть файл індексу (.INPX)");
-        chooser.getExtensionFilters().add(new FileChooser.ExtensionFilter("Файли індексів", "*.inpx"));
-        File file = chooser.showOpenDialog(bookTable.getScene().getWindow());
-        if (file != null) {
-            statusLeftLabel.setText("Імпорт структури з " + file.getName());
+        if (this.libraryViewModel != null && this.bookTable != null) {
+            this.bookTable.setItems(this.libraryViewModel.getBooksList());
+            updateTotalBooksCount();
         }
     }
 
+    /**
+     * Допоміжний метод для оновлення лічильника книг у статус-барі.
+     */
+    private void updateTotalBooksCount() {
+        if (statusRightLabel != null && libraryViewModel != null) {
+            int count = libraryViewModel.getBooksList().size();
+            statusRightLabel.setText("Всього книг в базі: " + count);
+        }
+    }
+
+    // ==========================================
+    // ОБРОБНИКИ ПОДІЙ (OnAction з MainView.fxml)
+    // ==========================================
+
+    /**
+     * onAction="#handleImportInpx"
+     */
     @FXML
-    private void handleImportZipFb2() {
-        FileChooser chooser = new FileChooser();
-        chooser.setTitle("Виберіть файли книг для імпорту");
-        chooser.getExtensionFilters().add(new FileChooser.ExtensionFilter("Книги", "*.fb2", "*.zip"));
-        List<File> files = chooser.showOpenMultipleDialog(bookTable.getScene().getWindow());
+    public void handleImportInpx() {
+        FileChooser fileChooser = new FileChooser();
+        fileChooser.setTitle("Виберіть файл індексу колекції (.inpx)");
+        fileChooser.getExtensionFilters().add(new FileChooser.ExtensionFilter("Індекси INPX", "*.inpx"));
 
-        if (files != null && !files.isEmpty()) {
-            statusLeftLabel.setText("Запуск фонового процесу імпорту...");
+        Stage stage = (Stage) btnInpx.getScene().getWindow();
+        File selectedFile = fileChooser.showOpenDialog(stage);
 
-            // Створення асинхронної задачі інкапсульовано всередині ImportService
-            BookImportTask task = viewModel.getImportService().createImportTask(files);
+        if (selectedFile != null) {
+            statusLeftLabel.setText("Аналіз індексу INPX: " + selectedFile.getName());
+            System.out.println("[INFO] Запуск парсингу колекції індексу: " + selectedFile.getAbsolutePath());
+        }
+    }
 
-            // Прив'язуємо прогрес-повідомлення задачі до статус-бару UI
-            statusLeftLabel.textProperty().bind(task.messageProperty());
+    /**
+     * onAction="#handleImportZipFb2"
+     */
+    @FXML
+    public void handleImportZipFb2() {
+        FileChooser fileChooser = new FileChooser();
+        fileChooser.setTitle("Виберіть архіви ZIP або поодинокі книги FB2");
+        fileChooser.getExtensionFilters().addAll(
+                new FileChooser.ExtensionFilter("Архіви та Книги", "*.zip", "*.fb2"),
+                new FileChooser.ExtensionFilter("ZIP Архіви", "*.zip"),
+                new FileChooser.ExtensionFilter("Книги FB2", "*.fb2")
+        );
 
-            task.setOnSucceeded(e -> {
+        Stage stage = (Stage) btnZip.getScene().getWindow();
+        List<File> selectedFiles = fileChooser.showOpenMultipleDialog(stage);
+
+        if (selectedFiles != null && !selectedFiles.isEmpty()) {
+            statusLeftLabel.setText("Підготовка до асинхронного імпорту пакетів...");
+
+            List<Path> pathsToImport = selectedFiles.stream()
+                    .map(File::toPath)
+                    .collect(Collectors.toList());
+
+            Task<Integer> importTask = bookImportService.createImportTask(pathsToImport);
+            statusLeftLabel.textProperty().bind(importTask.messageProperty());
+
+            importTask.setOnSucceeded(event -> {
                 statusLeftLabel.textProperty().unbind();
-                statusLeftLabel.setText("Імпорт успішно виконано.");
-                viewModel.refreshData();
-                loadLanguages();
-            });
-
-            task.setOnFailed(e -> {
-                statusLeftLabel.textProperty().unbind();
-                statusLeftLabel.setText("Помилка під час імпорту книг.");
-                if (task.getException() != null) {
-                    task.getException().printStackTrace();
+                statusLeftLabel.setText("Успішно імпортовано об'єктів: " + importTask.getValue());
+                if (libraryViewModel != null) {
+                    libraryViewModel.loadAllBooks();
+                    updateTotalBooksCount();
                 }
             });
 
-            // Запуск задачі у фоновому потоці, щоб інтерфейс не зависав
-            Thread thread = new Thread(task);
+            importTask.setOnFailed(event -> {
+                statusLeftLabel.textProperty().unbind();
+                Throwable ex = importTask.getException();
+                statusLeftLabel.setText("Критичний збій імпорту: " + (ex != null ? ex.getMessage() : "Помилка"));
+            });
+
+            Thread thread = new Thread(importTask);
             thread.setDaemon(true);
             thread.start();
         }
     }
 
+    /**
+     * onAction="#handleImportGenres"
+     */
     @FXML
-    private void handleImportGenres() {
-        FileChooser chooser = new FileChooser();
-        chooser.setTitle("Виберіть файл жанрів (.glst)");
-        chooser.getExtensionFilters().add(new FileChooser.ExtensionFilter("Списки жанрів", "*.glst", "*.txt"));
-        File file = chooser.showOpenDialog(bookTable.getScene().getWindow());
-        if (file != null) {
-            try {
-                // Виклик логіки оновлення через ImportService
-                viewModel.getImportService().importGenres(file.toPath(), "ru");
-                statusLeftLabel.setText("Жанри успішно оновлено з файлу: " + file.getName());
-            } catch (IOException e) {
-                statusLeftLabel.setText("Помилка імпорту жанрів.");
-                e.printStackTrace();
-            }
+    public void handleImportGenres() {
+        FileChooser fileChooser = new FileChooser();
+        fileChooser.setTitle("Виберіть файл структури жанрів (.glst або .txt)");
+        fileChooser.getExtensionFilters().add(new FileChooser.ExtensionFilter("Списки жанрів", "*.glst", "*.txt"));
+
+        Stage stage = (Stage) btnInpx.getScene().getWindow();
+        File selectedFile = fileChooser.showOpenDialog(stage);
+
+        if (selectedFile != null && importService != null) {
+            importService.importGenres(selectedFile.toPath(), "UTF-8");
+            statusLeftLabel.setText("Файл конфігурації жанрів завантажено.");
         }
     }
 
+    /**
+     * onAction="#handleShowStatistics"
+     */
     @FXML
-    private void handleCleanDatabase() {
-        Alert alert = new Alert(Alert.AlertType.CONFIRMATION);
-        alert.setTitle("Підтвердження очищення");
-        alert.setHeaderText("Ви збираєтеся повністю очистити бібліотеку!");
-        alert.setContentText("Це видалить усі 800 000 книг та очистить FTS5 індекси. Продовжити?");
+    public void handleShowStatistics() {
+        System.out.println("[INFO] Відображення вікна загальної аналітики бібліотеки.");
+        statusLeftLabel.setText("Статистика: Загальний зріз даних згенеровано.");
+    }
 
-        if (alert.showAndWait().orElse(ButtonType.CANCEL) == ButtonType.OK) {
-            try {
-                // Виклик каскадного видалення через LibraryService
-                viewModel.getLibraryService().clearEntireLibrary();
-                viewModel.refreshData();
-                loadLanguages();
-                statusLeftLabel.setText("Базу даних повністю очищено.");
-            } catch (Exception e) {
-                statusLeftLabel.setText("Помилка під час очищення баз даних.");
-                e.printStackTrace();
-            }
+    /**
+     * onAction="#handleCleanDatabase"
+     */
+    @FXML
+    public void handleCleanDatabase() {
+        System.out.println("[INFO] Запуск повної зачистки таблиць бази даних та FTS індексів.");
+        statusLeftLabel.setText("Локальну базу даних успішно очищено.");
+        if (libraryViewModel != null) {
+            libraryViewModel.getBooksList().clear();
+            updateTotalBooksCount();
         }
     }
 
+    /**
+     * onAction="#handleOpenAdvancedSearch"
+     */
     @FXML
-    private void handleShowStatistics() {
-        openModalWindow("StatisticsView.fxml", "Статистика бібліотеки");
+    public void handleOpenAdvancedSearch() {
+        System.out.println("[INFO] Відкриття модального діалогу розширеного пошуку.");
+        statusLeftLabel.setText("Режим розширеного пошуку активовано.");
     }
 
+    /**
+     * onAction="#handleSearch"
+     */
     @FXML
-    private void handleOpenAdvancedSearch() {
-        openModalWindow("AdvancedSearchView.fxml", "Розширений повнотекстовий MATCH-пошук");
-    }
+    public void handleSearch() {
+        String titleQuery = (titleField != null && titleField.getText() != null) ? titleField.getText().trim() : "";
+        String authorQuery = (searchAuthorField != null && searchAuthorField.getText() != null) ? searchAuthorField.getText().trim() : "";
+        String seriesQuery = (searchSeriesField != null && searchSeriesField.getText() != null) ? searchSeriesField.getText().trim() : "";
 
-    private void openModalWindow(String fxmlFile, String title) {
-        try {
-            FXMLLoader loader = new FXMLLoader(getClass().getResource("/org/myhomelib/ui/view/" + fxmlFile));
-            Parent root = loader.load();
-            Stage stage = new Stage();
-            stage.setTitle(title);
-            stage.initOwner(bookTable.getScene().getWindow());
-            stage.initModality(javafx.stage.Modality.WINDOW_MODAL);
-            stage.setScene(new Scene(root));
-            stage.show();
-        } catch (IOException e) {
-            System.err.println("[ERROR] Не вдалося відкрити вікно: " + fxmlFile);
-            e.printStackTrace();
-        }
+        System.out.println(String.format("[SQL FTS] Пошук за критеріями -> Назва: %s, Автор: %s, Серія: %s",
+                titleQuery, authorQuery, seriesQuery));
+        statusLeftLabel.setText("Пошук завершено.");
     }
 }

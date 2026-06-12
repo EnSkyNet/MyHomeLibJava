@@ -5,40 +5,62 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.List;
 
+/**
+ * Репозиторій для управління жанрами у SQLite.
+ * Безпечно обробляє SQLException для інтеграції з JavaFX.
+ */
 public class GenreRepository {
-    private final DatabaseManager dbManager;
 
-    public GenreRepository(DatabaseManager dbManager) {
-        this.dbManager = dbManager;
+    private final DatabaseManager databaseManager;
+
+    public GenreRepository(DatabaseManager databaseManager) {
+        this.databaseManager = databaseManager;
     }
 
-    public void insertGenre(String code, String name, String lang) {
-        String sql = "INSERT OR REPLACE INTO genres (code, name, lang) VALUES (?, ?, ?)";
-        Connection conn = dbManager.getConnection();
-        try (PreparedStatement pstmt = conn.prepareStatement(sql)) {
-            pstmt.setString(1, code);
-            pstmt.setString(2, name);
-            pstmt.setString(3, lang);
-            pstmt.executeUpdate();
-        } catch (SQLException e) {
-            throw new RuntimeException("Помилка вставки жанру з кодом: " + code, e);
-        }
-    }
+    /**
+     * Отримати список усіх унікальних жанрів із бази даних.
+     */
+    public List<String> findAll() {
+        List<String> genres = new ArrayList<>();
+        String sql = "SELECT DISTINCT name FROM genres ORDER BY name ASCII;";
 
-    public String findGenreNameByCode(String code) {
-        String sql = "SELECT name FROM genres WHERE code = ? LIMIT 1";
-        Connection conn = dbManager.getConnection();
-        try (PreparedStatement pstmt = conn.prepareStatement(sql)) {
-            pstmt.setString(1, code);
-            try (ResultSet rs = pstmt.executeQuery()) {
-                if (rs.next()) {
-                    return rs.getString("name");
+        try (Connection conn = databaseManager.getConnection();
+             PreparedStatement pstmt = conn.prepareStatement(sql);
+             ResultSet rs = pstmt.executeQuery()) {
+
+            while (rs.next()) {
+                String genre = rs.getString("name");
+                if (genre != null && !genre.isBlank()) {
+                    genres.add(genre);
                 }
             }
         } catch (SQLException e) {
-            throw new RuntimeException("Помилка пошуку назви жанру за кодом: " + code, e);
+            System.err.println("[REPO ERR] Помилка findAll у GenreRepository: " + e.getMessage());
+            throw new RuntimeException(e);
         }
-        return code; // Якщо перекладу немає, повертаємо початковий код
+        return genres;
+    }
+
+    /**
+     * Зберегти новий жанр у базу даних.
+     */
+    public void save(String genreName) {
+        if (genreName == null || genreName.isBlank()) return;
+
+        String sql = "INSERT OR IGNORE INTO genres (name) VALUES (?);";
+
+        try (Connection conn = databaseManager.getConnection();
+             PreparedStatement pstmt = conn.prepareStatement(sql)) {
+
+            pstmt.setString(1, genreName.trim());
+            pstmt.executeUpdate();
+
+        } catch (SQLException e) {
+            System.err.println("[REPO ERR] Помилка save у GenreRepository: " + e.getMessage());
+            throw new RuntimeException(e);
+        }
     }
 }

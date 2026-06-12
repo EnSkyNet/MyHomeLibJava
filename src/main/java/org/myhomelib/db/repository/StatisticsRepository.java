@@ -6,51 +6,68 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 
+/**
+ * Репозиторій для збору аналітики та статистичних даних по бібліотеці.
+ * Безпечно обробляє SQLException для інтеграції з UI JavaFX.
+ */
 public class StatisticsRepository {
-    private final DatabaseManager dbManager;
 
-    public StatisticsRepository(DatabaseManager dbManager) {
-        this.dbManager = dbManager;
+    private final DatabaseManager databaseManager;
+
+    public StatisticsRepository(DatabaseManager databaseManager) {
+        this.databaseManager = databaseManager;
     }
 
-    public int getBooksCount() {
-        String sql = "SELECT COUNT(*) FROM books";
-        Connection conn = dbManager.getConnection();
-        try (PreparedStatement pstmt = conn.prepareStatement(sql);
+    /**
+     * Отримати загальну кількість книг у базі даних.
+     */
+    public long getTotalBooksCount() {
+        String sql = "SELECT COUNT(*) FROM books;";
+        try (Connection conn = databaseManager.getConnection();
+             PreparedStatement pstmt = conn.prepareStatement(sql);
              ResultSet rs = pstmt.executeQuery()) {
             if (rs.next()) {
-                return rs.getInt(1);
+                return rs.getLong(1);
             }
         } catch (SQLException e) {
-            throw new RuntimeException("Помилка розрахунку загальної кількості книг", e);
+            System.err.println("[STATS REPO ERR] Помилка getTotalBooksCount: " + e.getMessage());
+            throw new RuntimeException(e);
         }
         return 0;
     }
 
-    public int getAuthorsCount() {
-        String sql = "SELECT COUNT(DISTINCT author_name) FROM book_authors";
-        Connection conn = dbManager.getConnection();
-        try (PreparedStatement pstmt = conn.prepareStatement(sql);
+    /**
+     * Отримати загальну кількість унікальних авторів у системі.
+     */
+    public long getTotalAuthorsCount() {
+        String sql = "SELECT COUNT(*) FROM authors;";
+        try (Connection conn = databaseManager.getConnection();
+             PreparedStatement pstmt = conn.prepareStatement(sql);
              ResultSet rs = pstmt.executeQuery()) {
             if (rs.next()) {
-                return rs.getInt(1);
+                return rs.getLong(1);
             }
         } catch (SQLException e) {
-            throw new RuntimeException("Помилка розрахунку кількості унікальних авторів", e);
+            System.err.println("[STATS REPO ERR] Помилка getTotalAuthorsCount: " + e.getMessage());
+            throw new RuntimeException(e);
         }
         return 0;
     }
 
-    public int getGenresCount() {
-        String sql = "SELECT COUNT(*) FROM genres";
-        Connection conn = dbManager.getConnection();
-        try (PreparedStatement pstmt = conn.prepareStatement(sql);
+    /**
+     * Отримати сумарний розмір усіх зареєстрованих файлів книг у байтах.
+     */
+    public long getTotalLibrarySizeInBytes() {
+        String sql = "SELECT TOTAL(file_size) FROM books;";
+        try (Connection conn = databaseManager.getConnection();
+             PreparedStatement pstmt = conn.prepareStatement(sql);
              ResultSet rs = pstmt.executeQuery()) {
             if (rs.next()) {
-                return rs.getInt(1);
+                return rs.getLong(1);
             }
         } catch (SQLException e) {
-            throw new RuntimeException("Помилка розрахунку кількості завантажених жанрів", e);
+            System.err.println("[STATS REPO ERR] Помилка getTotalLibrarySizeInBytes: " + e.getMessage());
+            throw new RuntimeException(e);
         }
         return 0;
     }
